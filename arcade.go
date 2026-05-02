@@ -12,8 +12,7 @@ import (
 const arcadeBase = "https://arcade-v2-us-1.bsvblockchain.tech"
 
 type arcadeClient struct {
-	http   *http.Client
-	apiKey string
+	http *http.Client
 }
 
 type arcadeResp struct {
@@ -26,11 +25,8 @@ type arcadeResp struct {
 	ExtraInfo   string `json:"extraInfo"`
 }
 
-func newArcadeClient(apiKey string) *arcadeClient {
-	return &arcadeClient{
-		http:   &http.Client{Timeout: 30 * time.Second},
-		apiKey: apiKey,
-	}
+func newArcadeClient() *arcadeClient {
+	return &arcadeClient{http: &http.Client{Timeout: 30 * time.Second}}
 }
 
 func (c *arcadeClient) broadcast(efBytes []byte) (string, error) {
@@ -39,9 +35,6 @@ func (c *arcadeClient) broadcast(efBytes []byte) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {

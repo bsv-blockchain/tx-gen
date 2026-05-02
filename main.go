@@ -19,8 +19,6 @@ func main() {
 		port = "8080"
 	}
 
-	apiKey := os.Getenv("ARCADE_API_KEY")
-
 	woc := newWOCClient()
 	lockScript := buildLockScript()
 	scriptHash := scriptToHash(lockScript)
@@ -38,7 +36,7 @@ func main() {
 		q.Push(u)
 	}
 
-	arcade := newArcadeClient(apiKey)
+	arcade := newArcadeClient()
 	engine := newEngine(q, arcade, lockScript)
 	server := newServer(engine, adminToken)
 
@@ -46,7 +44,7 @@ func main() {
 	defer cancel()
 
 	go engine.run(ctx)
-	go subscribeSSE(ctx, apiKey)
+	go subscribeSSE(ctx)
 
 	go func() {
 		if err := server.start(":" + port); err != nil {
