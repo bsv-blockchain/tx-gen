@@ -39,16 +39,16 @@ func (n *notify) Broadcast() {
 
 type Engine struct {
 	queue      *Queue
-	woc        *wocClient
+	arcade     *arcadeClient
 	lockScript []byte
 	tps        atomic.Int64
-	resume     *notify // broadcast when TPS goes from 0 → >0
+	resume     *notify
 }
 
-func newEngine(q *Queue, woc *wocClient, lockScript []byte) *Engine {
+func newEngine(q *Queue, arcade *arcadeClient, lockScript []byte) *Engine {
 	return &Engine{
 		queue:      q,
-		woc:        woc,
+		arcade:     arcade,
 		lockScript: lockScript,
 		resume:     newNotify(),
 	}
@@ -63,7 +63,6 @@ func (e *Engine) SetTPS(tps int64) {
 
 func (e *Engine) TPS() int64 { return e.tps.Load() }
 
-// run is the main engine goroutine. It bootstraps if needed then launches chains.
 func (e *Engine) run(ctx context.Context) {
 	qlen := e.queue.Len()
 	log.Printf("startup: %d UTXOs", qlen)
@@ -94,12 +93,12 @@ func (e *Engine) bootstrapFull(ctx context.Context) error {
 		return fmt.Errorf("queue empty")
 	}
 
-	rawHex, l1Outputs, err := buildFanoutTx(utxo, fanoutSize, e.lockScript)
+	efBytes, l1Outputs, err := buildFanoutTx(utxo, fanoutSize, e.lockScript)
 	if err != nil {
 		e.queue.Push(utxo)
 		return fmt.Errorf("build L1: %w", err)
 	}
-	txid, err := e.woc.broadcast(rawHex)
+	txid, err := e.arcade.broadcast(efBytes)
 	if err != nil {
 		e.queue.Push(utxo)
 		return fmt.Errorf("broadcast L1: %w", err)
@@ -132,12 +131,12 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 		wg.Add(1)
 		go func(parent UTXO) {
 			defer wg.Done()
-			rawHex, outputs, err := buildFanoutTx(parent, fanoutSize, e.lockScript)
+			efBytes, outputs, err := buildFanoutTx(parent, fanoutSize, e.lockScript)
 			if err != nil {
 				log.Printf("L2 build %s: %v", parent.TxHash, err)
 				return
 			}
-			txid, err := e.woc.broadcast(rawHex)
+			txid, err := e.arcade.broadcast(efBytes)
 			if err != nil {
 				log.Printf("L2 broadcast %s: %v", parent.TxHash, err)
 				return
@@ -172,7 +171,6 @@ func (e *Engine) startChains(ctx context.Context) {
 	<-ctx.Done()
 }
 
-// waitActive blocks until TPS > 0 or ctx is cancelled.
 func (e *Engine) waitActive(ctx context.Context) (int64, bool) {
 	for {
 		if tps := e.tps.Load(); tps > 0 {
@@ -186,14 +184,11 @@ func (e *Engine) waitActive(ctx context.Context) (int64, bool) {
 	}
 }
 
-// chainInterval returns how long each chain should wait between transactions
-// so that the aggregate rate across numChains chains equals tps.
 func chainInterval(tps int64) time.Duration {
 	return time.Duration(float64(numChains) / float64(tps) * float64(time.Second))
 }
 
 func (e *Engine) runChain(ctx context.Context, utxo UTXO) {
-	// Spread initial fire across one interval to avoid thundering herd.
 	tps, ok := e.waitActive(ctx)
 	if !ok {
 		return
@@ -217,12 +212,12 @@ func (e *Engine) runChain(ctx context.Context, utxo UTXO) {
 		case <-time.After(chainInterval(tps)):
 		}
 
-		rawHex, newUTXO, err := buildSustainTx(utxo, e.lockScript)
+		efBytes, newUTXO, err := buildSustainTx(utxo, e.lockScript)
 		if err != nil {
 			log.Printf("sustain build %s:%d: %v", utxo.TxHash, utxo.TxPos, err)
 			continue
 		}
-		txid, err := e.woc.broadcast(rawHex)
+		txid, err := e.arcade.broadcast(efBytes)
 		if err != nil {
 			log.Printf("sustain broadcast %s:%d: %v — retry next tick", utxo.TxHash, utxo.TxPos, err)
 			continue

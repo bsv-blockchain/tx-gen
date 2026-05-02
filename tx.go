@@ -9,8 +9,9 @@ import (
 )
 
 // sustainFee: ceil(62 bytes × 100 sat/KB) = 7 sats.
-// 62 = 4 ver + 1 in_count + 42 input + 1 out_count + 10 output + 4 locktime
+// Raw tx: 4 ver + 1 in_count + 42 input + 1 out_count + 10 output + 4 locktime = 62
 // output = 8 value + 1 script_len + 1 OP_NOP4
+// EF adds 10 bytes per input (8 prevSatoshis + 1 scriptLen + 1 OP_NOP4) — transport only, not counted for fee.
 const sustainFee = 7
 
 func buildLockScript() []byte {
@@ -25,59 +26,54 @@ func scriptToHash(script []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-// buildFanoutTx creates a 1-input N-output transaction splitting value evenly.
-// Fee is computed from actual tx size at 100 sat/KB rounded up.
-func buildFanoutTx(utxo UTXO, n int, lockScript []byte) (string, []UTXO, error) {
-	// 4 ver + 1 in_count + 42 input + 1 out_count + n*(8+1+len(script)) + 4 locktime
-	txSize := uint64(4 + 1 + 42 + 1 + n*(8+1+len(lockScript)) + 4)
-	fee := (txSize*100 + 999) / 1000 // ceil at 100 sat/KB
+// buildFanoutTx creates a 1-input N-output EF transaction splitting value evenly.
+// Fee computed from raw tx size at 100 sat/KB rounded up (EF overhead excluded).
+func buildFanoutTx(utxo UTXO, n int, lockScript []byte) ([]byte, []UTXO, error) {
+	// Raw tx size (no EF overhead): 4+1+42+1 + n*(8+1+len) + 4
+	rawSize := uint64(4 + 1 + 42 + 1 + n*(8+1+len(lockScript)) + 4)
+	fee := (rawSize*100 + 999) / 1000
 
 	if utxo.Value <= fee {
-		return "", nil, fmt.Errorf("value %d too small for fanout fee %d", utxo.Value, fee)
+		return nil, nil, fmt.Errorf("value %d too small for fanout fee %d", utxo.Value, fee)
 	}
 	perOutput := (utxo.Value - fee) / uint64(n)
 	if perOutput == 0 {
-		return "", nil, fmt.Errorf("per-output value is 0")
+		return nil, nil, fmt.Errorf("per-output value is 0")
 	}
 
 	txid := reversedTxID(utxo.TxHash)
 	if txid == nil {
-		return "", nil, fmt.Errorf("invalid txid: %s", utxo.TxHash)
+		return nil, nil, fmt.Errorf("invalid txid: %s", utxo.TxHash)
 	}
 
 	var buf bytes.Buffer
-	binary.Write(&buf, binary.LittleEndian, uint32(1))
-	buf.WriteByte(0x01)
-	buf.Write(txid)
-	binary.Write(&buf, binary.LittleEndian, uint32(utxo.TxPos))
-	buf.WriteByte(0x01)
-	buf.WriteByte(0x51)
-	binary.Write(&buf, binary.LittleEndian, uint32(0xFFFFFFFF))
-
+	binary.Write(&buf, binary.LittleEndian, uint32(1)) // version
+	buf.WriteByte(0x01)                                // 1 input
+	writeEFInput(&buf, txid, utxo.TxPos, utxo.Value, lockScript)
 	writeVarInt(&buf, uint64(n))
 	for i := 0; i < n; i++ {
 		binary.Write(&buf, binary.LittleEndian, uint64(perOutput))
 		writeVarInt(&buf, uint64(len(lockScript)))
 		buf.Write(lockScript)
 	}
-	binary.Write(&buf, binary.LittleEndian, uint32(0))
+	binary.Write(&buf, binary.LittleEndian, uint32(0)) // locktime
 
 	outputs := make([]UTXO, n)
 	for i := range outputs {
 		outputs[i] = UTXO{TxPos: uint32(i), Value: perOutput}
 	}
-	return hex.EncodeToString(buf.Bytes()), outputs, nil
+	return buf.Bytes(), outputs, nil
 }
 
-// buildSustainTx creates the next tx in a chain.
-// output = max(0, value - sustainFee). Caller checks newUTXO.Value == 0 to detect chain end.
-func buildSustainTx(utxo UTXO, lockScript []byte) (string, UTXO, error) {
+// buildSustainTx creates the next EF tx in a chain.
+// outValue = max(0, value−sustainFee). Caller checks newUTXO.Value == 0 for chain end.
+func buildSustainTx(utxo UTXO, lockScript []byte) ([]byte, UTXO, error) {
 	if utxo.Value == 0 {
-		return "", UTXO{}, fmt.Errorf("UTXO has 0 value")
+		return nil, UTXO{}, fmt.Errorf("zero value UTXO")
 	}
 	txid := reversedTxID(utxo.TxHash)
 	if txid == nil {
-		return "", UTXO{}, fmt.Errorf("invalid txid: %s", utxo.TxHash)
+		return nil, UTXO{}, fmt.Errorf("invalid txid: %s", utxo.TxHash)
 	}
 
 	var outValue uint64
@@ -88,20 +84,28 @@ func buildSustainTx(utxo UTXO, lockScript []byte) (string, UTXO, error) {
 	var buf bytes.Buffer
 	binary.Write(&buf, binary.LittleEndian, uint32(1))
 	buf.WriteByte(0x01)
-	buf.Write(txid)
-	binary.Write(&buf, binary.LittleEndian, uint32(utxo.TxPos))
-	buf.WriteByte(0x01)
-	buf.WriteByte(0x51)
-	binary.Write(&buf, binary.LittleEndian, uint32(0xFFFFFFFF))
-
-	buf.WriteByte(0x01)
+	writeEFInput(&buf, txid, utxo.TxPos, utxo.Value, lockScript)
+	buf.WriteByte(0x01) // 1 output
 	binary.Write(&buf, binary.LittleEndian, uint64(outValue))
 	writeVarInt(&buf, uint64(len(lockScript)))
 	buf.Write(lockScript)
-
 	binary.Write(&buf, binary.LittleEndian, uint32(0))
 
-	return hex.EncodeToString(buf.Bytes()), UTXO{TxPos: 0, Value: outValue}, nil
+	return buf.Bytes(), UTXO{TxPos: 0, Value: outValue}, nil
+}
+
+// writeEFInput writes one input in Extended Format:
+// [prevTxID][vout][scriptLen][OP_TRUE][sequence][prevSatoshis][prevScriptLen][prevScript]
+func writeEFInput(buf *bytes.Buffer, reversedTxid []byte, vout uint32, prevSatoshis uint64, prevScript []byte) {
+	buf.Write(reversedTxid)
+	binary.Write(buf, binary.LittleEndian, uint32(vout))
+	buf.WriteByte(0x01) // unlock script len
+	buf.WriteByte(0x51) // OP_TRUE
+	binary.Write(buf, binary.LittleEndian, uint32(0xFFFFFFFF)) // sequence
+	// EF extension
+	binary.Write(buf, binary.LittleEndian, uint64(prevSatoshis))
+	writeVarInt(buf, uint64(len(prevScript)))
+	buf.Write(prevScript)
 }
 
 func reversedTxID(hash string) []byte {

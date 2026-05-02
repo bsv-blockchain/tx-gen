@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -62,28 +61,3 @@ func (c *wocClient) fetchUnspent(scriptHash string) ([]UTXO, error) {
 	return utxos, nil
 }
 
-func (c *wocClient) broadcast(rawTxHex string) (string, error) {
-	url := c.base + "/tx/raw"
-	body := fmt.Sprintf(`{"txhex":"%s"}`, rawTxHex)
-	resp, err := c.http.Post(url, "application/json", strings.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("broadcast %d: %s", resp.StatusCode, data)
-	}
-
-	// WOC returns the txid as a JSON-encoded string
-	var txid string
-	if err := json.Unmarshal(data, &txid); err != nil {
-		txid = strings.Trim(string(data), `"`)
-	}
-	return txid, nil
-}
