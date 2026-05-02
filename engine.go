@@ -93,13 +93,12 @@ func (e *Engine) bootstrapFull(ctx context.Context) error {
 		return fmt.Errorf("queue empty")
 	}
 
-	efBytes, l1Outputs, err := buildFanoutTx(utxo, fanoutSize, e.lockScript)
+	txid, efBytes, l1Outputs, err := buildFanoutTx(utxo, fanoutSize, e.lockScript)
 	if err != nil {
 		e.queue.Push(utxo)
 		return fmt.Errorf("build L1: %w", err)
 	}
-	txid, err := e.arcade.broadcast(efBytes)
-	if err != nil {
+	if err := e.arcade.broadcast(efBytes); err != nil {
 		e.queue.Push(utxo)
 		return fmt.Errorf("broadcast L1: %w", err)
 	}
@@ -131,13 +130,12 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 		wg.Add(1)
 		go func(parent UTXO) {
 			defer wg.Done()
-			efBytes, outputs, err := buildFanoutTx(parent, fanoutSize, e.lockScript)
+			txid, efBytes, outputs, err := buildFanoutTx(parent, fanoutSize, e.lockScript)
 			if err != nil {
 				log.Printf("L2 build %s: %v", parent.TxHash, err)
 				return
 			}
-			txid, err := e.arcade.broadcast(efBytes)
-			if err != nil {
+			if err := e.arcade.broadcast(efBytes); err != nil {
 				log.Printf("L2 broadcast %s: %v", parent.TxHash, err)
 				return
 			}
@@ -212,13 +210,12 @@ func (e *Engine) runChain(ctx context.Context, utxo UTXO) {
 		case <-time.After(chainInterval(tps)):
 		}
 
-		efBytes, newUTXO, err := buildSustainTx(utxo, e.lockScript)
+		txid, efBytes, newUTXO, err := buildSustainTx(utxo, e.lockScript)
 		if err != nil {
 			log.Printf("sustain build %s:%d: %v", utxo.TxHash, utxo.TxPos, err)
 			continue
 		}
-		txid, err := e.arcade.broadcast(efBytes)
-		if err != nil {
+		if err := e.arcade.broadcast(efBytes); err != nil {
 			log.Printf("sustain broadcast %s:%d: %v — retry next tick", utxo.TxHash, utxo.TxPos, err)
 			continue
 		}

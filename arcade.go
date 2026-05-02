@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,44 +14,29 @@ type arcadeClient struct {
 	http *http.Client
 }
 
-type arcadeResp struct {
-	TXID        string `json:"txid"`
-	Status      int    `json:"status"`
-	Title       string `json:"title"`
-	BlockHash   string `json:"blockHash"`
-	BlockHeight int    `json:"blockHeight"`
-	Timestamp   string `json:"timestamp"`
-	ExtraInfo   string `json:"extraInfo"`
-}
-
 func newArcadeClient() *arcadeClient {
 	return &arcadeClient{http: &http.Client{Timeout: 30 * time.Second}}
 }
 
-func (c *arcadeClient) broadcast(efBytes []byte) (string, error) {
+// broadcast sends an EF-encoded transaction to arcade.
+// The txid must be computed by the caller via computeTxID before calling this.
+func (c *arcadeClient) broadcast(efBytes []byte) error {
 	req, err := http.NewRequest("POST", arcadeBase+"/tx", bytes.NewReader(efBytes))
 	if err != nil {
-		return "", err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("arcade %d: %s", resp.StatusCode, body)
+	// arcade returns 202 Accepted with {"status":"submitted"}
+	if resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("arcade %d: %s", resp.StatusCode, body)
 	}
-
-	var result arcadeResp
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("decode response: %w — body: %s", err, body)
-	}
-	if result.TXID == "" {
-		return "", fmt.Errorf("no txid in response: %s", body)
-	}
-	return result.TXID, nil
+	return nil
 }
