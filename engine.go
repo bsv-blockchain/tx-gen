@@ -217,21 +217,6 @@ func (e *Engine) runChain(ctx context.Context, utxo UTXO) {
 		case <-time.After(chainInterval(tps)):
 		}
 
-		if utxo.Value <= terminalMin {
-			rawHex, err := buildTerminalTx(utxo)
-			if err != nil {
-				log.Printf("terminal build %s:%d: %v", utxo.TxHash, utxo.TxPos, err)
-				return
-			}
-			txid, err := e.woc.broadcast(rawHex)
-			if err != nil {
-				log.Printf("terminal broadcast %s:%d: %v — retry next tick", utxo.TxHash, utxo.TxPos, err)
-				continue
-			}
-			log.Printf("chain done → terminal %s", txid)
-			return
-		}
-
 		rawHex, newUTXO, err := buildSustainTx(utxo, e.lockScript)
 		if err != nil {
 			log.Printf("sustain build %s:%d: %v", utxo.TxHash, utxo.TxPos, err)
@@ -243,6 +228,10 @@ func (e *Engine) runChain(ctx context.Context, utxo UTXO) {
 			continue
 		}
 		newUTXO.TxHash = txid
+		if newUTXO.Value == 0 {
+			log.Printf("chain done → %s (0-sat output, chain length %d)", txid, utxo.Value/sustainFee)
+			return
+		}
 		utxo = newUTXO
 	}
 }

@@ -8,15 +8,13 @@ import (
 	"fmt"
 )
 
-const (
-	sustainFee  = 100           // sats: 1-in 1-out tx (~66 bytes)
-	fanoutFee   = 2000          // sats: 1-in 100-out tx (~1452 bytes)
-	terminalMin = 2 * sustainFee // spend to OP_RETURN when value drops to this
-)
+// sustainFee: ceil(62 bytes × 100 sat/KB) = 7 sats.
+// 62 = 4 ver + 1 in_count + 42 input + 1 out_count + 10 output + 4 locktime
+// output = 8 value + 1 script_len + 1 OP_NOP4
+const sustainFee = 7
 
 func buildLockScript() []byte {
-	// "acade2 OP_DROP" = 03 AC AD E2 75
-	return []byte{0x03, 0xAC, 0xAD, 0xE2, 0x75}
+	return []byte{0xB9} // OP_NOP4
 }
 
 func scriptToHash(script []byte) string {
@@ -28,11 +26,16 @@ func scriptToHash(script []byte) string {
 }
 
 // buildFanoutTx creates a 1-input N-output transaction splitting value evenly.
+// Fee is computed from actual tx size at 100 sat/KB rounded up.
 func buildFanoutTx(utxo UTXO, n int, lockScript []byte) (string, []UTXO, error) {
-	if utxo.Value <= fanoutFee {
-		return "", nil, fmt.Errorf("value %d too small for fanout fee %d", utxo.Value, fanoutFee)
+	// 4 ver + 1 in_count + 42 input + 1 out_count + n*(8+1+len(script)) + 4 locktime
+	txSize := uint64(4 + 1 + 42 + 1 + n*(8+1+len(lockScript)) + 4)
+	fee := (txSize*100 + 999) / 1000 // ceil at 100 sat/KB
+
+	if utxo.Value <= fee {
+		return "", nil, fmt.Errorf("value %d too small for fanout fee %d", utxo.Value, fee)
 	}
-	perOutput := (utxo.Value - uint64(fanoutFee)) / uint64(n)
+	perOutput := (utxo.Value - fee) / uint64(n)
 	if perOutput == 0 {
 		return "", nil, fmt.Errorf("per-output value is 0")
 	}
@@ -43,12 +46,12 @@ func buildFanoutTx(utxo UTXO, n int, lockScript []byte) (string, []UTXO, error) 
 	}
 
 	var buf bytes.Buffer
-	binary.Write(&buf, binary.LittleEndian, uint32(1)) // version
-	buf.WriteByte(0x01)                                // 1 input
+	binary.Write(&buf, binary.LittleEndian, uint32(1))
+	buf.WriteByte(0x01)
 	buf.Write(txid)
 	binary.Write(&buf, binary.LittleEndian, uint32(utxo.TxPos))
-	buf.WriteByte(0x01) // script len
-	buf.WriteByte(0x51) // OP_TRUE
+	buf.WriteByte(0x01)
+	buf.WriteByte(0x51)
 	binary.Write(&buf, binary.LittleEndian, uint32(0xFFFFFFFF))
 
 	writeVarInt(&buf, uint64(n))
@@ -57,7 +60,7 @@ func buildFanoutTx(utxo UTXO, n int, lockScript []byte) (string, []UTXO, error) 
 		writeVarInt(&buf, uint64(len(lockScript)))
 		buf.Write(lockScript)
 	}
-	binary.Write(&buf, binary.LittleEndian, uint32(0)) // locktime
+	binary.Write(&buf, binary.LittleEndian, uint32(0))
 
 	outputs := make([]UTXO, n)
 	for i := range outputs {
@@ -66,17 +69,21 @@ func buildFanoutTx(utxo UTXO, n int, lockScript []byte) (string, []UTXO, error) 
 	return hex.EncodeToString(buf.Bytes()), outputs, nil
 }
 
-// buildSustainTx creates a 1-in 1-out chain-continuation transaction.
+// buildSustainTx creates the next tx in a chain.
+// output = max(0, value - sustainFee). Caller checks newUTXO.Value == 0 to detect chain end.
 func buildSustainTx(utxo UTXO, lockScript []byte) (string, UTXO, error) {
-	if utxo.Value <= sustainFee {
-		return "", UTXO{}, fmt.Errorf("value %d <= fee %d", utxo.Value, sustainFee)
+	if utxo.Value == 0 {
+		return "", UTXO{}, fmt.Errorf("UTXO has 0 value")
 	}
 	txid := reversedTxID(utxo.TxHash)
 	if txid == nil {
 		return "", UTXO{}, fmt.Errorf("invalid txid: %s", utxo.TxHash)
 	}
 
-	outValue := utxo.Value - uint64(sustainFee)
+	var outValue uint64
+	if utxo.Value > sustainFee {
+		outValue = utxo.Value - sustainFee
+	}
 
 	var buf bytes.Buffer
 	binary.Write(&buf, binary.LittleEndian, uint32(1))
@@ -87,7 +94,7 @@ func buildSustainTx(utxo UTXO, lockScript []byte) (string, UTXO, error) {
 	buf.WriteByte(0x51)
 	binary.Write(&buf, binary.LittleEndian, uint32(0xFFFFFFFF))
 
-	buf.WriteByte(0x01) // 1 output
+	buf.WriteByte(0x01)
 	binary.Write(&buf, binary.LittleEndian, uint64(outValue))
 	writeVarInt(&buf, uint64(len(lockScript)))
 	buf.Write(lockScript)
@@ -95,34 +102,6 @@ func buildSustainTx(utxo UTXO, lockScript []byte) (string, UTXO, error) {
 	binary.Write(&buf, binary.LittleEndian, uint32(0))
 
 	return hex.EncodeToString(buf.Bytes()), UTXO{TxPos: 0, Value: outValue}, nil
-}
-
-// buildTerminalTx burns the UTXO into OP_FALSE OP_RETURN; full value becomes miner fee.
-func buildTerminalTx(utxo UTXO) (string, error) {
-	txid := reversedTxID(utxo.TxHash)
-	if txid == nil {
-		return "", fmt.Errorf("invalid txid: %s", utxo.TxHash)
-	}
-
-	opReturn := []byte{0x00, 0x6a} // OP_FALSE OP_RETURN
-
-	var buf bytes.Buffer
-	binary.Write(&buf, binary.LittleEndian, uint32(1))
-	buf.WriteByte(0x01)
-	buf.Write(txid)
-	binary.Write(&buf, binary.LittleEndian, uint32(utxo.TxPos))
-	buf.WriteByte(0x01)
-	buf.WriteByte(0x51)
-	binary.Write(&buf, binary.LittleEndian, uint32(0xFFFFFFFF))
-
-	buf.WriteByte(0x01) // 1 output
-	binary.Write(&buf, binary.LittleEndian, uint64(0))
-	writeVarInt(&buf, uint64(len(opReturn)))
-	buf.Write(opReturn)
-
-	binary.Write(&buf, binary.LittleEndian, uint32(0))
-
-	return hex.EncodeToString(buf.Bytes()), nil
 }
 
 func reversedTxID(hash string) []byte {
