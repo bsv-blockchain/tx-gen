@@ -12,9 +12,8 @@ import (
 const arcadeBase = "https://arcade-v2-us-1.bsvblockchain.tech"
 
 type arcadeClient struct {
-	http        *http.Client
-	apiKey      string
-	callbackURL string // base URL of this service; empty = no X-CallbackUrl header
+	http   *http.Client
+	apiKey string
 }
 
 type arcadeResp struct {
@@ -27,11 +26,10 @@ type arcadeResp struct {
 	ExtraInfo   string `json:"extraInfo"`
 }
 
-func newArcadeClient(apiKey, callbackURL string) *arcadeClient {
+func newArcadeClient(apiKey string) *arcadeClient {
 	return &arcadeClient{
-		http:        &http.Client{Timeout: 30 * time.Second},
-		apiKey:      apiKey,
-		callbackURL: callbackURL,
+		http:   &http.Client{Timeout: 30 * time.Second},
+		apiKey: apiKey,
 	}
 }
 
@@ -43,9 +41,6 @@ func (c *arcadeClient) broadcast(efBytes []byte) (string, error) {
 	req.Header.Set("Content-Type", "application/octet-stream")
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
-	if c.callbackURL != "" {
-		req.Header.Set("X-CallbackUrl", c.callbackURL+"/arc-callback")
 	}
 
 	resp, err := c.http.Do(req)
