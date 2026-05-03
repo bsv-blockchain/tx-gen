@@ -141,7 +141,7 @@ func normalizedTxMode(mode *TxMode) *TxMode {
 }
 
 func buildLockScript() *script.Script {
-	s := script.Script{script.OpNOP10} // 0xB9
+	s := script.Script{script.OpNOP4} // 0xB4
 	return &s
 }
 
