@@ -16,7 +16,7 @@ By default transactions use an `OP_NOP4` locking script and `OP_TRUE` unlocking 
 
 - Go 1.25+
 - A BSV mainnet UTXO locked to `OP_NOP4` (0xB9), or a P2PKH UTXO for the configured `PRIVATE_KEY`
-- Enough satoshis to sustain your intended chain length (`value / 7` transactions per chain for OP_NOP4, `value / 16` for default P2PKH)
+- Enough satoshis to sustain your intended chain length (`value / 7` transactions per chain for OP_NOP4, `value / 20` for default P2PKH)
 - Network access to WhatOnChain and the Arcade v2 node
 
 ## Setup
@@ -36,7 +36,7 @@ go build -o bsv-tx-gen .
 | `ADMIN_TOKEN` | yes | — | Bearer token for the `/config` endpoint |
 | `PORT` | no | `8080` | HTTP listen port |
 | `PRIVATE_KEY` | no | empty | Enables P2PKH mode when set. Accepts WIF or 32-byte hex private keys. |
-| `SUSTAIN_FEE` | no | `7` or `16` | Satoshis per sustain hop. Defaults to `7` for OP_NOP4 and `16` for P2PKH. |
+| `SUSTAIN_FEE` | no | `7` or `20` | Satoshis per sustain hop. Defaults to `7` for OP_NOP4 and `20` for P2PKH. |
 
 ## Running
 
@@ -62,7 +62,7 @@ Valid range: `0`–`10000`. Setting `0` pauses all chains without losing state.
 
 | Metric | Formula | Example (1000 sat output) |
 |---|---|---|
-| Fee per hop | 7 sat OP_NOP4, 16 sat P2PKH | 7 or 16 sat |
+| Fee per hop | 7 sat OP_NOP4, 20 sat P2PKH | 7 or 20 sat |
 | Chain length | `value / fee` txs | ~142 txs at 7 sat |
 | Interval per chain at 16 TPS | `10000 / 16` ≈ 625 s | ~10 min |
 | Sustained TPS with 10k chains | `10000 / interval` | 16 TPS |
@@ -93,7 +93,7 @@ See RUNBOOK.md for complete table. Key ops vars:
 | `NUM_CHAINS` | `10000` | Target chains (fanout * sustain) |
 | `FANOUT_SIZE` | `100` | L1 fanout width |
 | `PRIVATE_KEY` | (empty) | Enables P2PKH lock/unlock and P2PKH scripthash lookup |
-| `SUSTAIN_FEE` | `7` or `16` | Satoshis per sustain hop; P2PKH default is `16` |
+| `SUSTAIN_FEE` | `7` or `20` | Satoshis per sustain hop; P2PKH default is `20` |
 | `MAX_TPS` | `10000` | Hard cap (degrade if requested > capacity) |
 | `SLACK_WEBHOOK_URL` | (empty) | Enables alerts + reorg case-study posts |
 | `ENVIRONMENT` | `production` | Tags all Slack / logs |

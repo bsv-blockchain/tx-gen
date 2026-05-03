@@ -15,7 +15,7 @@ import (
 
 // sustainFee: ceil(62 bytes × 100 sat/KB) = 7 sats.
 const sustainFee = 7
-const p2pkhSustainFee = 16
+const p2pkhSustainFee = 20
 
 const (
 	txModeOPNOP4 = "op_nop4"

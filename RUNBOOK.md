@@ -15,7 +15,7 @@ Optional with defaults:
 - PRIVATE_KEY= (empty = OP_NOP4 mode; WIF or 32-byte hex = P2PKH mode)
 - NUM_CHAINS=10000
 - FANOUT_SIZE=100
-- SUSTAIN_FEE=7 (defaults to 16 when PRIVATE_KEY is set)
+- SUSTAIN_FEE=7 (defaults to 20 when PRIVATE_KEY is set)
 - MAX_TPS=10000
 - BROADCAST_CONCURRENCY=64
 - BROADCAST_RETRY_MAX=3

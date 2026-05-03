@@ -93,7 +93,7 @@ All 10,000 chain goroutines block immediately. No state is lost; resume by setti
 - `numChains = 10_000`
 - `fanoutSize = 100`
 - OP_NOP4 sustain fee: `7` sats per hop
-- P2PKH sustain fee: `16` sats per hop by default
+- P2PKH sustain fee: `20` sats per hop by default
 - Default lock script: `0xB9` (OP_NOP10 in go-sdk, called OP_NOP4 in this codebase)
 - Default unlock script: `0x51` (OP_TRUE)
 - Arcade base URL: `https://arcade-v2-us-1.bsvblockchain.tech`
