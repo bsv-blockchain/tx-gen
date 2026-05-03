@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/bsv-blockchain/go-sdk/script"
 )
 
 const (
@@ -40,12 +42,12 @@ func (n *notify) Broadcast() {
 type Engine struct {
 	queue      *Queue
 	arcade     *arcadeClient
-	lockScript []byte
+	lockScript *script.Script
 	tps        atomic.Int64
 	resume     *notify
 }
 
-func newEngine(q *Queue, arcade *arcadeClient, lockScript []byte) *Engine {
+func newEngine(q *Queue, arcade *arcadeClient, lockScript *script.Script) *Engine {
 	return &Engine{
 		queue:      q,
 		arcade:     arcade,
