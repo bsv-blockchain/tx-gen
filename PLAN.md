@@ -71,7 +71,7 @@ Introduce an internal state snapshot owned by `Engine`:
 - bootstrap progress and bootstrap failures
 - consecutive Arcade broadcast failures and last successful broadcast time
 - last WoC fetch time and result
-- SSE connection status, last tip height, last tip time, last reorg time
+- SSE connection status, last tip height, last tip time, last reorg: {height, depth, time, chainsImpacted estimate}
 - last significant error with timestamp and component
 
 This is the foundation for health checks, metrics, Slack alerts, and useful `/status`
@@ -115,6 +115,7 @@ Use `github.com/prometheus/client_golang`. Expose at `GET /metrics`.
 | Counter | `txgen_auth_fail_total` | — |
 | Counter | `txgen_sse_event_total` | `stream` (tip/reorg) |
 | Counter | `txgen_sse_disconnect_total` | `stream` |
+| Counter | `txgen_reorg_total` | `depth` (1-6+) |
 | Gauge | `txgen_tps_target` | — |
 | Gauge | `txgen_chains_active` | — |
 | Gauge | `txgen_queue_depth` | — |
@@ -175,7 +176,7 @@ Turn fanout bootstrap into an explicit state machine:
 Configured by env vars: `SLACK_WEBHOOK_URL`, `SLACK_CHANNEL`, `ENVIRONMENT`,
 `INSTANCE_ID`. No-op if `SLACK_WEBHOOK_URL` is unset.
 
-Alert on:
+Alert on (problems):
 
 - bootstrap failure or partial bootstrap
 - generator entered `failed` or `degraded`
@@ -185,9 +186,16 @@ Alert on:
 - SSE stream disconnected or tip data stale beyond threshold
 - chain exhaustion approaching zero usable chains
 
-The notifier deduplicates and rate-limits (one alert per condition per window). Sends a
-recovery message when the condition clears. Payload includes component, severity,
-current TPS, active chains, last error, and a short operator action hint.
+Notable events (always captured, optional Slack post for case studies):
+
+- Reorg detected on mainnet (rare) — record structured log with before/after tip height,
+  reorg depth, estimated affected chains, and timestamp. Post concise informational
+  message to Slack (different from problem alerts) so operators can collect real-world
+  reorg handling evidence for case studies. The system must continue operating normally.
+
+The notifier supports both problem alerts (with recovery messages) and notable events.
+It deduplicates and rate-limits alerts (one per condition per window). Payload for both
+types includes component, severity, current TPS, active chains, and relevant details.
 
 ### 10. Graceful Shutdown and Lifecycle (`main.go`, `server.go`, `engine.go`)
 
@@ -250,6 +258,9 @@ effective config (secrets redacted) in `/status` output.
   line received; fires `resp.Body.Close()` on idle to force reconnect.
 - Increment `txgen_sse_event_total` per event; `txgen_sse_disconnect_total` per
   reconnect; set `txgen_sse_connected{stream}` gauge.
+- On reorg event: parse depth, old/new tip, update engine state, log at info level with
+  full details, increment `txgen_reorg_total{depth}` (new counter), and call
+  `notifier.ReportReorg(...)` so the rare mainnet event is captured for case studies.
 
 ### 14. Critical-Path Tests (`tx_test.go`, `engine_test.go` new)
 
@@ -288,7 +299,8 @@ effective config (secrets redacted) in `/status` output.
 
 **README/SKILL additions:** Docker run example with volume mount, all env vars table,
 `/metrics` + `/healthz` + `/readyz` + `/status` docs, ops section (backup `state.db`,
-read panic counter, what `readyz` failure means, Slack alert meanings).
+read panic counter, what `readyz` failure means, Slack alert meanings, reorg case-study
+collection via Slack).
 
 ### 16. Operator Runbook (`RUNBOOK.md` new)
 
@@ -298,6 +310,8 @@ Document in the repo:
 - Start/stop commands (bare metal and Docker).
 - How to set TPS, check health, and inspect status.
 - What each Slack alert means and the recommended first action.
+- Reorg events: how they are logged, posted to Slack for case studies, and that normal
+  operation continues with no chain loss.
 - How to safely restart and reconcile chain state from `state.db`.
 - Expected behavior when TPS is 0, Arcade is degraded, and WoC is unavailable.
 - How to back up and restore `state.db`.
@@ -356,6 +370,8 @@ Document in the repo:
 - Operators can start, stop, set TPS, and inspect status without reading logs.
 - Health checks fail when transaction generation is not actually functional.
 - Slack receives actionable, deduplicated issue and recovery reports.
+- Reorg handling produces structured logs + optional Slack case-study posts with depth,
+  heights, and confirmation that chains continued without loss.
 - TPS changes take effect within seconds, not after old per-chain sleep intervals.
 - A transient Arcade or network failure does not silently reduce chain capacity.
 - A crash followed by restart restores UTXO queue from `state.db` without re-bootstrap.
