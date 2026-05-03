@@ -1,0 +1,32 @@
+services:
+  tx-gen:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - tx-gen-data:/data
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-admin1234}
+      PORT: "8080"
+      STATE_PATH: /data/state.db
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      ARCADE_BASE_URL: ${ARCADE_BASE_URL:-https://arcade-v2-us-1.bsvblockchain.tech}
+      WOC_BASE_URL: ${WOC_BASE_URL:-https://api.whatsonchain.com/v1/bsv/main}
+      NUM_CHAINS: ${NUM_CHAINS:-10000}
+      FANOUT_SIZE: ${FANOUT_SIZE:-100}
+      SUSTAIN_FEE: ${SUSTAIN_FEE:-7}
+      MAX_TPS: ${MAX_TPS:-10000}
+      BROADCAST_CONCURRENCY: ${BROADCAST_CONCURRENCY:-64}
+      BROADCAST_RETRY_MAX: ${BROADCAST_RETRY_MAX:-3}
+      HTTP_TIMEOUT: ${HTTP_TIMEOUT:-30s}
+      SSE_RECONNECT_INITIAL: ${SSE_RECONNECT_INITIAL:-1s}
+      SSE_RECONNECT_MAX: ${SSE_RECONNECT_MAX:-30s}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      SLACK_CHANNEL: ${SLACK_CHANNEL:-#alerts}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      INSTANCE_ID: ${INSTANCE_ID:-local}
+    restart: unless-stopped
+
+volumes:
+  tx-gen-data:
