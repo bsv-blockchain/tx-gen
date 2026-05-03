@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,7 @@ type Config struct {
 	LogFormat            string
 	ArcadeBaseURL        string
 	WOCBaseURL           string
+	PrivateKey           string
 	NumChains            int
 	FanoutSize           int
 	SustainFee           uint64
@@ -66,6 +68,11 @@ func getEnvDuration(key string, def time.Duration) time.Duration {
 }
 
 func LoadConfig() (*Config, error) {
+	privateKey := strings.TrimSpace(getEnv("PRIVATE_KEY", ""))
+	defaultSustainFee := uint64(sustainFee)
+	if privateKey != "" {
+		defaultSustainFee = p2pkhSustainFee
+	}
 	c := &Config{
 		AdminToken:           getEnv("ADMIN_TOKEN", ""),
 		Port:                 getEnv("PORT", "8080"),
@@ -74,9 +81,10 @@ func LoadConfig() (*Config, error) {
 		LogFormat:            getEnv("LOG_FORMAT", "json"),
 		ArcadeBaseURL:        getEnv("ARCADE_BASE_URL", "https://arcade-v2-us-1.bsvblockchain.tech"),
 		WOCBaseURL:           getEnv("WOC_BASE_URL", "https://api.whatsonchain.com/v1/bsv/main"),
+		PrivateKey:           privateKey,
 		NumChains:            getEnvInt("NUM_CHAINS", 10000),
 		FanoutSize:           getEnvInt("FANOUT_SIZE", 100),
-		SustainFee:           getEnvUint64("SUSTAIN_FEE", 7),
+		SustainFee:           getEnvUint64("SUSTAIN_FEE", defaultSustainFee),
 		MaxTPS:               getEnvInt("MAX_TPS", 10000),
 		BroadcastConcurrency: getEnvInt("BROADCAST_CONCURRENCY", 64),
 		BroadcastRetryMax:    getEnvInt("BROADCAST_RETRY_MAX", 3),
@@ -99,6 +107,9 @@ func (c *Config) String() string {
 	if redacted.AdminToken != "" {
 		redacted.AdminToken = "***"
 	}
+	if redacted.PrivateKey != "" {
+		redacted.PrivateKey = "***"
+	}
 	if redacted.SlackWebhookURL != "" {
 		redacted.SlackWebhookURL = "***"
 	}
@@ -110,6 +121,9 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 	redacted := *c
 	if redacted.AdminToken != "" {
 		redacted.AdminToken = "***"
+	}
+	if redacted.PrivateKey != "" {
+		redacted.PrivateKey = "***"
 	}
 	if redacted.SlackWebhookURL != "" {
 		redacted.SlackWebhookURL = "***"

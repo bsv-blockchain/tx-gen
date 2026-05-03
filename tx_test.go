@@ -1,11 +1,16 @@
 package main
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
+
+	sdktx "github.com/bsv-blockchain/go-sdk/transaction"
 )
 
 // testTxID is a valid 64-char hex txid used across all test files.
 const testTxID = "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
+const testP2PKHWIF = "cNGwGSc7KRrTmdLUZ54fiSXWbhLNDc2Eg5zNucgQxyQCzuQ5YRDq"
 
 func TestBuildFanoutTx(t *testing.T) {
 	ls := buildLockScript()
@@ -109,6 +114,150 @@ func TestBuildSustainTxInvalidTxID(t *testing.T) {
 	_, _, _, err := buildSustainTx(utxo, ls)
 	if err == nil {
 		t.Fatal("expected error for invalid txid, got nil")
+	}
+}
+
+func TestTxModeDefaultsToOPNOP4(t *testing.T) {
+	mode, err := NewTxModeFromConfig(&Config{})
+	if err != nil {
+		t.Fatalf("NewTxModeFromConfig: %v", err)
+	}
+	if mode.Name != txModeOPNOP4 {
+		t.Fatalf("mode.Name = %q, want %q", mode.Name, txModeOPNOP4)
+	}
+	if mode.SustainFee != sustainFee {
+		t.Fatalf("mode.SustainFee = %d, want %d", mode.SustainFee, sustainFee)
+	}
+	if mode.Unlocker != nil {
+		t.Fatal("OP_NOP4 mode should not have an unlocking template")
+	}
+	if got, want := scriptHash(mode.LockScript), scriptHash(buildLockScript()); got != want {
+		t.Fatalf("script hash = %s, want %s", got, want)
+	}
+}
+
+func TestTxModeUsesP2PKHWhenPrivateKeyIsSet(t *testing.T) {
+	mode, err := NewTxModeFromConfig(&Config{PrivateKey: testP2PKHWIF})
+	if err != nil {
+		t.Fatalf("NewTxModeFromConfig: %v", err)
+	}
+	if mode.Name != txModeP2PKH {
+		t.Fatalf("mode.Name = %q, want %q", mode.Name, txModeP2PKH)
+	}
+	if mode.SustainFee != p2pkhSustainFee {
+		t.Fatalf("mode.SustainFee = %d, want %d", mode.SustainFee, p2pkhSustainFee)
+	}
+	if mode.Unlocker == nil {
+		t.Fatal("P2PKH mode should have an unlocking template")
+	}
+	if mode.Address == "" {
+		t.Fatal("P2PKH address is empty")
+	}
+	if !mode.LockScript.IsP2PKH() {
+		t.Fatalf("lock script %x is not P2PKH", []byte(*mode.LockScript))
+	}
+	if got, want := scriptHash(mode.LockScript), scriptHash(buildLockScript()); got == want {
+		t.Fatalf("P2PKH script hash should differ from OP_NOP4 hash %s", want)
+	}
+}
+
+func TestTxModeRejectsInvalidPrivateKey(t *testing.T) {
+	_, err := NewTxModeFromConfig(&Config{PrivateKey: "not-a-private-key"})
+	if err == nil {
+		t.Fatal("expected invalid private key error, got nil")
+	}
+	if !strings.Contains(err.Error(), "PRIVATE_KEY") {
+		t.Fatalf("error = %q, want PRIVATE_KEY context", err.Error())
+	}
+}
+
+func TestBuildSustainTxP2PKHSignsInput(t *testing.T) {
+	mode, err := NewTxModeFromConfig(&Config{PrivateKey: testP2PKHWIF})
+	if err != nil {
+		t.Fatalf("NewTxModeFromConfig: %v", err)
+	}
+	utxo := UTXO{TxHash: testTxID, TxPos: 0, Value: 100}
+
+	txid, ef, newUTXO, err := buildSustainTxWithMode(utxo, mode)
+	if err != nil {
+		t.Fatalf("buildSustainTxWithMode: %v", err)
+	}
+	if newUTXO.Value != 100-p2pkhSustainFee {
+		t.Fatalf("newUTXO.Value = %d, want %d", newUTXO.Value, 100-p2pkhSustainFee)
+	}
+	tx, err := sdktx.NewTransactionFromBytes(ef)
+	if err != nil {
+		t.Fatalf("parse EF: %v", err)
+	}
+	if got := tx.TxID().String(); got != txid {
+		t.Fatalf("txid = %s, want parsed txid %s", txid, got)
+	}
+	if len(tx.Inputs) != 1 {
+		t.Fatalf("inputs = %d, want 1", len(tx.Inputs))
+	}
+	unlock := tx.Inputs[0].UnlockingScript
+	if unlock == nil || len(*unlock) == 0 {
+		t.Fatal("P2PKH input was not signed")
+	}
+	if len(tx.Outputs) != 1 || !tx.Outputs[0].LockingScript.IsP2PKH() {
+		t.Fatalf("output locking script is not P2PKH")
+	}
+}
+
+func TestLoadConfigDefaultsAndRedactsPrivateKey(t *testing.T) {
+	t.Setenv("ADMIN_TOKEN", "secret")
+	t.Setenv("PRIVATE_KEY", testP2PKHWIF)
+	t.Setenv("SUSTAIN_FEE", "")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.SustainFee != p2pkhSustainFee {
+		t.Fatalf("SustainFee = %d, want %d", cfg.SustainFee, p2pkhSustainFee)
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("MarshalJSON: %v", err)
+	}
+	if strings.Contains(string(b), testP2PKHWIF) {
+		t.Fatalf("Config MarshalJSON leaked private key: %s", b)
+	}
+	view, err := json.Marshal(redactedConfig(cfg))
+	if err != nil {
+		t.Fatalf("redactedConfig marshal: %v", err)
+	}
+	if strings.Contains(string(view), testP2PKHWIF) {
+		t.Fatalf("redactedConfig leaked private key: %s", view)
+	}
+}
+
+func TestEnsureStateMatchesTxModeRejectsMismatchedState(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.SetMeta(metaLockScriptHash, scriptHash(buildLockScript())); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	mode, err := NewTxModeFromConfig(&Config{PrivateKey: testP2PKHWIF})
+	if err != nil {
+		t.Fatalf("NewTxModeFromConfig: %v", err)
+	}
+	if err := ensureStateMatchesTxMode(store, mode, true); err == nil {
+		t.Fatal("expected state mode mismatch error, got nil")
+	}
+}
+
+func TestEnsureStateMatchesTxModeRejectsLegacyP2PKHState(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.SaveUTXO(UTXO{TxHash: testTxID, TxPos: 0, Value: 100}); err != nil {
+		t.Fatalf("SaveUTXO: %v", err)
+	}
+	mode, err := NewTxModeFromConfig(&Config{PrivateKey: testP2PKHWIF})
+	if err != nil {
+		t.Fatalf("NewTxModeFromConfig: %v", err)
+	}
+	err = ensureStateMatchesTxMode(store, mode, true)
+	if err == nil || !strings.Contains(err.Error(), "without lock-script metadata") {
+		t.Fatalf("ensureStateMatchesTxMode error = %v, want legacy P2PKH state refusal", err)
 	}
 }
 

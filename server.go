@@ -371,6 +371,9 @@ func redactedConfig(cfg *Config) any {
 	if redacted.AdminToken != "" {
 		redacted.AdminToken = "***"
 	}
+	if redacted.PrivateKey != "" {
+		redacted.PrivateKey = "***"
+	}
 	if redacted.SlackWebhookURL != "" {
 		redacted.SlackWebhookURL = "***"
 	}

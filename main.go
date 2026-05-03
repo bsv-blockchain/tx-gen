@@ -14,6 +14,11 @@ import (
 
 var version = "dev"
 
+const (
+	metaLockScriptHash = "lock_script_hash"
+	metaTxMode         = "tx_mode"
+)
+
 func main() {
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -35,13 +40,27 @@ func main() {
 	defer stopSignals()
 
 	woc := newWOCClientWithConfig(cfg, logger)
-	lockScript := buildLockScript()
-	scriptHash := scriptToHash(lockScript)
-	logger.Info("lock script ready", "script_hash", scriptHash)
+	txMode, err := NewTxModeFromConfig(cfg)
+	if err != nil {
+		logger.Error("configure transaction mode", "error", err)
+		closeStore(logger, store)
+		os.Exit(1)
+	}
+	scriptHash := scriptToHash(txMode.LockScript)
+	attrs := []any{"mode", txMode.Name, "script_hash", scriptHash, "sustain_fee", txMode.SustainFee}
+	if txMode.Address != "" {
+		attrs = append(attrs, "address", txMode.Address)
+	}
+	logger.Info("lock script ready", attrs...)
 
 	utxos, err := store.LoadAll()
 	if err != nil {
 		logger.Error("restore UTXOs", "error", err)
+		closeStore(logger, store)
+		os.Exit(1)
+	}
+	if err := ensureStateMatchesTxMode(store, txMode, len(utxos) > 0); err != nil {
+		logger.Error("state transaction mode mismatch", "error", err)
 		closeStore(logger, store)
 		os.Exit(1)
 	}
@@ -65,7 +84,7 @@ func main() {
 	SetQueueDepth(q.Len())
 
 	arcade := newArcadeClientWithConfig(cfg, store, logger)
-	engine := newEngine(q, arcade, lockScript)
+	engine := newEngineWithMode(q, arcade, txMode)
 	engine.configure(cfg.NumChains, cfg.FanoutSize)
 	engine.SetUTXOSource(woc)
 	server := newServerWithConfig(engine, cfg, store, logger)
@@ -146,4 +165,30 @@ func closeStore(logger *slog.Logger, store *Store) {
 		return
 	}
 	logger.Info("store closed")
+}
+
+func ensureStateMatchesTxMode(store *Store, mode *TxMode, hasUTXOs bool) error {
+	if store == nil || mode == nil {
+		return nil
+	}
+	currentHash := scriptToHash(mode.LockScript)
+	storedHash, err := store.GetMeta(metaLockScriptHash)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", metaLockScriptHash, err)
+	}
+	if storedHash != "" && storedHash != currentHash {
+		return fmt.Errorf("state lock script hash %s does not match configured %s; use a separate STATE_PATH or reconcile the existing state", storedHash, currentHash)
+	}
+	if storedHash == "" && hasUTXOs && mode.Name == txModeP2PKH {
+		return fmt.Errorf("state has persisted UTXOs without lock-script metadata; refusing P2PKH mode because existing outpoint scripts cannot be verified")
+	}
+	if storedHash == "" {
+		if err := store.SetMeta(metaLockScriptHash, currentHash); err != nil {
+			return fmt.Errorf("write %s: %w", metaLockScriptHash, err)
+		}
+	}
+	if err := store.SetMeta(metaTxMode, mode.Name); err != nil {
+		return fmt.Errorf("write %s: %w", metaTxMode, err)
+	}
+	return nil
 }

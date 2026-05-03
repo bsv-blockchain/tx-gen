@@ -10,7 +10,7 @@ Generates BSV mainnet transactions at a configurable TPS. Bootstraps 10,000 UTXO
 ## Prerequisites
 
 - Go 1.25+ installed (`go version`)
-- A BSV mainnet UTXO locked to `OP_NOP4` (0xB9) with sufficient satoshis
+- A BSV mainnet UTXO locked to `OP_NOP4` (0xB9), or a P2PKH UTXO matching `PRIVATE_KEY`
 - `ADMIN_TOKEN` secret (any string; used for Bearer auth on `/config`)
 - Outbound HTTPS to `api.whatsonchain.com` and `arcade-v2-us-1.bsvblockchain.tech`
 
@@ -22,6 +22,7 @@ cd /path/to/bsv-tx-gen
 # 1. Set env vars
 export ADMIN_TOKEN=<secret>
 export PORT=8080          # optional, default 8080
+# export PRIVATE_KEY=<wif-or-hex>  # optional; enables P2PKH mode
 
 # 2. Build
 go build -o bsv-tx-gen .
@@ -81,7 +82,7 @@ All 10,000 chain goroutines block immediately. No state is lost; resume by setti
 | Symptom | Check |
 |---|---|
 | `ADMIN_TOKEN env var required` | Export `ADMIN_TOKEN` before running |
-| `fetch UTXOs: ...` error | WhatOnChain connectivity; verify UTXO exists and is locked to OP_NOP4 |
+| `fetch UTXOs: ...` error | WhatOnChain connectivity; verify UTXO exists for the active mode's locking script |
 | `arcade 4xx: ...` | EF format or connectivity issue with Arcade v2 |
 | `bootstrap error: value N too small` | Funded UTXO too small; need `> 106` sats for L1 fanout |
 | `started 0 chains` | Bootstrap produced no UTXOs; check arcade broadcast errors above |
@@ -91,7 +92,8 @@ All 10,000 chain goroutines block immediately. No state is lost; resume by setti
 
 - `numChains = 10_000`
 - `fanoutSize = 100`
-- `sustainFee = 7` sats per hop
-- Lock script: `0xB9` (OP_NOP10 in go-sdk, called OP_NOP4 in this codebase)
-- Unlock script: `0x51` (OP_TRUE)
+- OP_NOP4 sustain fee: `7` sats per hop
+- P2PKH sustain fee: `16` sats per hop by default
+- Default lock script: `0xB9` (OP_NOP10 in go-sdk, called OP_NOP4 in this codebase)
+- Default unlock script: `0x51` (OP_TRUE)
 - Arcade base URL: `https://arcade-v2-us-1.bsvblockchain.tech`

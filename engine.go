@@ -113,6 +113,7 @@ type Engine struct {
 	source      UTXOSource // optional; inject via SetUTXOSource for WoC reconciliation
 	store       *Store
 	lockScript  *script.Script
+	txMode      *TxMode
 
 	// Overridable by tests (defaults set in newEngine).
 	numChains  int
@@ -132,6 +133,11 @@ type Engine struct {
 }
 
 func newEngine(q *Queue, arcade *arcadeClient, lockScript *script.Script) *Engine {
+	return newEngineWithMode(q, arcade, newOPNOP4TxMode(lockScript, sustainFee))
+}
+
+func newEngineWithMode(q *Queue, arcade *arcadeClient, mode *TxMode) *Engine {
+	mode = normalizedTxMode(mode)
 	var store *Store
 	if arcade != nil {
 		store = arcade.store
@@ -141,7 +147,8 @@ func newEngine(q *Queue, arcade *arcadeClient, lockScript *script.Script) *Engin
 		arcade:      arcade,
 		broadcaster: arcade,
 		store:       store,
-		lockScript:  lockScript,
+		lockScript:  mode.LockScript,
+		txMode:      mode,
 		resume:      newNotify(),
 		numChains:   10_000,
 		fanoutSize:  100,
@@ -175,6 +182,16 @@ func newEngine(q *Queue, arcade *arcadeClient, lockScript *script.Script) *Engin
 		}
 	}
 	return e
+}
+
+func (e *Engine) mode() *TxMode {
+	if e != nil && e.txMode != nil {
+		return normalizedTxMode(e.txMode)
+	}
+	if e != nil {
+		return newOPNOP4TxMode(e.lockScript, sustainFee)
+	}
+	return newOPNOP4TxMode(buildLockScript(), sustainFee)
 }
 
 func (e *Engine) configure(numChains, fanoutSize int) {
@@ -364,7 +381,7 @@ func (e *Engine) bootstrapFull(ctx context.Context) error {
 		return fmt.Errorf("queue empty")
 	}
 
-	txid, efBytes, l1Outs, buildErr := buildFanoutTx(utxo, e.fanoutSize, e.lockScript)
+	txid, efBytes, l1Outs, buildErr := buildFanoutTxWithMode(utxo, e.fanoutSize, e.mode())
 	if buildErr != nil {
 		e.queue.PushMemory(utxo)
 		return fmt.Errorf("build L1: %w", buildErr)
@@ -455,7 +472,7 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 		statuses[i].Store(int32(psPending))
 		SafeGo(&wg, fmt.Sprintf("l2_%d", i), func() {
 			statuses[i].Store(int32(psBuilding))
-			txid, ef, outs, err := buildFanoutTx(parent, e.fanoutSize, e.lockScript)
+			txid, ef, outs, err := buildFanoutTxWithMode(parent, e.fanoutSize, e.mode())
 			if err != nil {
 				statuses[i].Store(int32(psFailed))
 				results[i] = l2result{err: fmt.Errorf("build %s: %w", parent.TxHash, err)}
@@ -554,7 +571,7 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 	}
 
 	if e.source != nil {
-		discovered, rerr := e.source.FetchUTXOs(ctx, scriptHash(e.lockScript))
+		discovered, rerr := e.source.FetchUTXOs(ctx, scriptHash(e.mode().LockScript))
 		e.setState(func(s *EngineState) {
 			s.LastWoCTime = time.Now()
 			if rerr != nil {
@@ -668,7 +685,8 @@ func (e *Engine) runChain(ctx context.Context, utxo UTXO) {
 			continue
 		}
 
-		txid, efBytes, newUTXO, err := buildSustainTx(utxo, e.lockScript)
+		mode := e.mode()
+		txid, efBytes, newUTXO, err := buildSustainTxWithMode(utxo, mode)
 		if err != nil {
 			log.Printf("sustain build %s:%d: %v", utxo.TxHash, utxo.TxPos, err)
 			continue
@@ -704,7 +722,7 @@ func (e *Engine) runChain(ctx context.Context, utxo UTXO) {
 		if newUTXO.Value == 0 {
 			e.chainsExhausted.Add(1)
 			IncChainTerminated("exhausted")
-			log.Printf("chain done → %s (chain length %d)", txid, utxo.Value/sustainFee)
+			log.Printf("chain done → %s (chain length %d)", txid, utxo.Value/mode.SustainFee)
 			return
 		}
 		utxo = newUTXO
