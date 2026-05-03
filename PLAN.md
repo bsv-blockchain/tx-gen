@@ -4,13 +4,21 @@
 
 This plan preserves the existing external API contract. In particular, `POST /config`
 with bearer-token auth and a `{"tps": number}` body should keep working as it does
-today. Any operational API additions should be backward compatible wrappers or
+today. Any operational API additions should be backward-compatible wrappers or
 read-only endpoints.
 
-The transaction construction path is small and direct. I would not redesign the
-locking script, unlocking script, EF encoding flow, or fee model unless tests prove
-they are wrong. The useful work is mostly around reliability, control, observability,
-and failure handling for unattended 24/7 operation.
+The transaction construction path is small and direct. Do not redesign the locking
+script, unlocking script, EF encoding flow, or fee model unless tests prove they are
+wrong. The useful work is around reliability, control, observability, and failure
+handling for unattended 24/7 operation.
+
+User selections (locked):
+- Persistence: BoltDB (`go.etcd.io/bbolt`)
+- Observability: Prometheus + `log/slog`
+- Deployment: Docker image
+- Tests: Critical path only (tx builders + engine state machine)
+
+---
 
 ## Current Assessment
 
@@ -22,14 +30,37 @@ The app is a compact generator:
 - It exposes `POST /config` to set TPS, where `0` effectively pauses generation.
 - It subscribes to Arcade tip and reorg SSE streams and logs events.
 
-That is a good minimal core, but it is not yet operationally complete for a
-long-running mainnet test load service. Important failures are currently only log
-lines, health cannot distinguish "HTTP server is up" from "generator is dead", and
-TPS changes can take a long time to affect already-sleeping chains.
+That is a good minimal core, but it is not operationally complete for a long-running
+mainnet test load service. The UTXO queue is purely in-memory (crash loses all state),
+logging is unstructured, health cannot distinguish "HTTP server is up" from "generator
+is dead", TPS changes can take a long time to affect already-sleeping chains, the
+bearer token is compared without constant-time, the HTTP transport uses `http.DefaultTransport`
+defaults (MaxIdleConnsPerHost=2, catastrophic at 10k chains), there is no panic
+recovery in chain goroutines, and no retry on Arcade failures.
+
+---
 
 ## Recommended Work
 
-### 1. Add an Explicit Engine State Model
+### 1. BoltDB Persistence (`store.go` new, `queue.go` modify)
+
+The UTXO queue is entirely in-memory. A `kill -9` or OOM loses all chain progress and
+requires a fresh bootstrap.
+
+- Open a `bbolt` DB at `STATE_PATH` (default `./state.db`); buckets: `utxos`, `meta`.
+- `Queue` keeps the in-memory min-heap for ordering and adds write-through to BoltDB
+  on every `Push`/`Pop` (single `Update` txn, UTXOs encoded as gob).
+- `Restore()` loads all UTXOs from the bucket at startup; skips WoC fetch if any are
+  found.
+- `meta` bucket records bootstrap stage: `none` → `l1_done` → `l2_done`. Engine reads
+  this at startup instead of inferring from queue length, removing the fragile
+  qlen==1 / qlen==100 heuristic.
+- Crash-safe broadcast: write a `pending/{txid}` record to BoltDB **before** broadcast;
+  on success atomically replace pending with the new UTXO entry. On startup, replay
+  any pending records as already-broadcast (arcade returned 202 — trust it).
+- `db.Close()` called from the graceful-shutdown path in `main.go`.
+
+### 2. Add an Explicit Engine State Model (`engine.go`)
 
 Introduce an internal state snapshot owned by `Engine`:
 
@@ -39,89 +70,110 @@ Introduce an internal state snapshot owned by `Engine`:
 - active chain count, target chain count, exhausted chain count
 - bootstrap progress and bootstrap failures
 - consecutive Arcade broadcast failures and last successful broadcast time
-- last WOC fetch time and result
+- last WoC fetch time and result
 - SSE connection status, last tip height, last tip time, last reorg time
-- last significant error, with timestamp and component
+- last significant error with timestamp and component
 
-This is the foundation for health checks, Slack alerts, and useful DevOps status.
-Without this, the process can look alive while `engine.run` has returned after a
+This is the foundation for health checks, metrics, Slack alerts, and useful `/status`
+output. Without it the process can look alive while `engine.run` has returned after a
 bootstrap failure.
 
-### 2. Add Health and Status Endpoints
+### 3. Add Health, Readiness, and Status Endpoints (`server.go`)
 
-Keep `POST /config` unchanged, and add backward-compatible operational endpoints:
+Keep `POST /config` unchanged. Add:
 
-- `GET /healthz`: unauthenticated liveness; returns 200 when the process and HTTP
-  server are alive.
-- `GET /readyz`: readiness; returns non-200 when the engine failed to bootstrap,
-  has zero usable chains, cannot reach Arcade, or has exceeded failure thresholds.
-- `GET /status`: authenticated JSON snapshot for operators and automation.
-- Optional `POST /start` and `POST /stop`: authenticated convenience wrappers over
-  existing TPS control. `POST /stop` should call the same internal path as
-  `POST /config {"tps":0}`.
+- `GET /healthz` — unauthenticated liveness; 200 when the process and HTTP server are
+  alive.
+- `GET /readyz` — readiness; non-200 when engine failed to bootstrap, has zero usable
+  chains, cannot reach Arcade, or has exceeded failure thresholds. Also non-200 while
+  bootstrap stage is not `l2_done`.
+- `GET /status` — authenticated JSON snapshot:
+  `{tps, queueDepth, chainsActive, bootstrapStage, sse:{tip,reorg}, version, uptime,
+  lastBroadcastError, lastBroadcastOk}`.
+- Optional `POST /stop` — authenticated convenience wrapper that calls
+  `SetTPS(0)`. `POST /start` does nothing new; `POST /config {"tps": N}` is enough.
 
-The key behavior is that DevOps can tell the difference between "the process is up",
-"the generator is ready to produce load", and "the requested load is actually being
-accepted by Arcade".
+### 4. Structured Logging (`main.go` + all log sites)
 
-### 3. Make TPS Control Immediate and Measurable
+Replace every `log.Printf`/`log.Println` with `log/slog` (stdlib, no extra deps):
+
+- `LOG_FORMAT=json|text` (default `json`); `LOG_LEVEL=debug|info|warn|error` (default `info`).
+- Single root logger built in `main.go` with base attrs `service=bsv-tx-gen` and
+  `version` (injected via ldflags).
+- Key events to log at structured level: bootstrap stages, TPS changes, broadcast
+  retries/failures, chain terminations, SSE connect/disconnect, panic recoveries.
+
+### 5. Prometheus Metrics (`metrics.go` new)
+
+Use `github.com/prometheus/client_golang`. Expose at `GET /metrics`.
+
+| Type | Name | Labels |
+|---|---|---|
+| Counter | `txgen_broadcast_total` | `kind` (fanout/sustain), `result` (ok/error/retry) |
+| Counter | `txgen_chain_terminated_total` | — |
+| Counter | `txgen_panic_total` | `goroutine` |
+| Counter | `txgen_auth_fail_total` | — |
+| Counter | `txgen_sse_event_total` | `stream` (tip/reorg) |
+| Counter | `txgen_sse_disconnect_total` | `stream` |
+| Gauge | `txgen_tps_target` | — |
+| Gauge | `txgen_chains_active` | — |
+| Gauge | `txgen_queue_depth` | — |
+| Gauge | `txgen_sse_connected` | `stream` |
+| Histogram | `txgen_broadcast_latency_seconds` | `kind` |
+
+### 6. Make TPS Control Immediate and Measurable (`engine.go`)
 
 Replace the per-chain `time.After(chainInterval(tps))` control loop with a central
 rate controller:
 
-- Wake workers immediately on every TPS change, including pause and resume.
-- Calculate rate from the actual active chain count, not only the hard-coded
-  `numChains` constant.
-- Track requested TPS, attempted TPS, accepted TPS, failed TPS, and current
-  broadcast latency.
+- Wake workers immediately on every TPS change, including pause and resume. Current
+  code only broadcasts a wake on `tps > 0`; a chain sleeping on a slow old interval
+  does not notice a higher TPS setting until its timer fires.
+- Calculate rate from actual active chain count, not the hard-coded `numChains`
+  constant.
+- Track requested TPS, attempted TPS, accepted TPS, failed TPS, and current broadcast
+  latency.
 - Clamp or degrade gracefully when requested TPS exceeds current capacity.
-- Report sustained under-delivery as degraded health and Slack alerts.
+- Report sustained under-delivery (accepted TPS < requested TPS for N seconds) as
+  `degraded` health and Slack alert.
 
-The current code uses `numChains` for interval calculation even if fewer chains
-actually started. It also only wakes paused chains; a running chain that is sleeping
-after a very low TPS setting may not notice a higher TPS setting until its old timer
-fires.
-
-### 4. Harden Arcade Broadcasts
+### 7. Harden Arcade Broadcasts (`arcade.go`)
 
 Upgrade `arcadeClient.broadcast` into a context-aware client with clear result
 classification:
 
-- Use `http.NewRequestWithContext`.
-- Tune the HTTP transport for high request volume: idle connection counts, per-host
-  connection limits, TLS reuse, and sensible timeouts.
-- Retry transient network errors, 429s, and 5xx responses with bounded exponential
-  backoff and jitter.
-- Treat known idempotent duplicate/already-seen responses as success if Arcade's
-  contract supports that.
-- Preserve enough information to reconcile unknown outcomes, especially when the
-  client times out after Arcade may have accepted the transaction.
-- Record structured counters for accepted, rejected, retried, timed out, and unknown
-  broadcasts.
+- Signature: `Broadcast(ctx context.Context, ef []byte) error`.
+- Tuned transport (`httpclient.go` new): `MaxIdleConnsPerHost=128`,
+  `MaxIdleConns=256`, `IdleConnTimeout=90s`, `ForceAttemptHTTP2=true`,
+  `DialContext` with `Timeout=5s, KeepAlive=30s`, `TLSHandshakeTimeout=5s`,
+  `ResponseHeaderTimeout=10s`. Arcade and WoC share one transport; SSE uses a
+  separate one with `ResponseHeaderTimeout=0`.
+- Retry transient network errors, 429s, and 5xx responses: exponential backoff
+  `100ms × 2^n + jitter`, max `BROADCAST_RETRY_MAX` attempts (default 3), capped at
+  5s per attempt.
+- Do not retry 4xx (except 429) — log at `warn` and drop.
+- Bounded concurrency via `BROADCAST_CONCURRENCY` (default 64) buffered-chan semaphore
+  acquired before every broadcast. Bootstrap L2 flows through the same semaphore.
+- Increment `txgen_broadcast_total{result=ok|error|retry}` and record latency.
+- Define `Broadcaster` interface in `engine.go` for test injection.
 
-This is a high-priority reliability item. A single transient broadcast error during
-L2 bootstrap currently logs the failure and loses that parent from the in-memory
-bootstrap flow, reducing chain capacity without making the process unhealthy.
-
-### 5. Make Bootstrap Retryable and Auditable
+### 8. Make Bootstrap Retryable and Auditable (`engine.go`)
 
 Turn fanout bootstrap into an explicit state machine:
 
-- Track each parent as pending, building, broadcasting, accepted, failed, or
-  unknown.
+- Track each parent as pending, building, broadcasting, accepted, failed, or unknown.
 - Retry transient failures with backoff.
 - Do not silently continue as healthy after partial L2 fanout.
 - Surface partial bootstrap in `/readyz`, `/status`, and Slack.
-- Add a reconciliation step that reloads script UTXOs from WOC after bootstrap
+- Add a reconciliation step that reloads script UTXOs from WoC after bootstrap
   attempts and compares expected outputs to discovered outputs.
+- Persist bootstrap stage in BoltDB `meta` bucket so partial bootstrap survives
+  restart.
 
-This avoids a class of failures where the service starts with fewer chains than
-expected and therefore cannot produce the requested long-running TPS.
+### 9. Add Slack Issue Reporting (`notifier.go` new)
 
-### 6. Add Slack Issue Reporting
-
-Add a small internal notifier, configured by environment variables such as
-`SLACK_WEBHOOK_URL`, `SLACK_CHANNEL`, `ENVIRONMENT`, and `INSTANCE_ID`.
+Configured by env vars: `SLACK_WEBHOOK_URL`, `SLACK_CHANNEL`, `ENVIRONMENT`,
+`INSTANCE_ID`. No-op if `SLACK_WEBHOOK_URL` is unset.
 
 Alert on:
 
@@ -129,94 +181,174 @@ Alert on:
 - generator entered `failed` or `degraded`
 - accepted TPS remains below requested TPS for a configured window
 - consecutive Arcade failures exceed threshold
-- broadcast unknown outcomes exceed threshold
-- no accepted transactions for a configured window while requested TPS is above 0
+- no accepted transactions for a configured window while TPS > 0
 - SSE stream disconnected or tip data stale beyond threshold
 - chain exhaustion approaching zero usable chains
 
-The notifier should deduplicate and rate-limit alerts so one outage does not flood
-Slack. Include component, severity, current TPS, active chains, last error, and a
-short operator action hint. Also send a recovery message when the condition clears.
+The notifier deduplicates and rate-limits (one alert per condition per window). Sends a
+recovery message when the condition clears. Payload includes component, severity,
+current TPS, active chains, last error, and a short operator action hint.
 
-### 7. Improve Graceful Shutdown and Process Lifecycle
+### 10. Graceful Shutdown and Lifecycle (`main.go`, `server.go`, `engine.go`)
 
-Use a single lifecycle manager for the HTTP server, engine, SSE subscribers, and
-network clients:
+- Replace `http.ListenAndServe` with `*http.Server` + `Shutdown(ctx)` (5s grace).
+- `safe.go` (new): `safeGo(wg *sync.WaitGroup, name string, fn func())` wraps `fn`
+  in `defer recover()` that logs at `error` with goroutine name and stack, increments
+  `txgen_panic_total{goroutine=name}`. Replaces every bare `go ...`.
+- Top-level `sync.WaitGroup` tracks all goroutines: HTTP server, `engine.run`, SSE
+  subscribers, every `runChain`, every bootstrap worker.
+- Shutdown sequence on SIGINT/SIGTERM: cancel root ctx → `server.Shutdown` →
+  `wg.Wait()` (30s deadline) → `db.Close()` → exit.
+- Log lifecycle transitions at `info`: `shutdown initiated`, `server stopped`,
+  `engine drained`, `db closed`.
 
-- Shut down `http.Server` with `Shutdown(ctx)` on SIGINT/SIGTERM.
-- Pass cancellation through WOC fetches, Arcade broadcasts, and SSE connects.
-- Wait for goroutines with `sync.WaitGroup` or `errgroup`.
-- Stop accepting new transactions before shutdown, then allow in-flight broadcasts
-  to finish within a bounded timeout.
-- Mark state as `stopping` and then `stopped` for health and logs.
+### 11. Externalize Runtime Configuration (`config.go` new)
 
-This reduces ambiguous shutdowns and makes restarts easier to reason about during
-operational incidents.
+Move all hard-coded constants to env vars. No extra deps (`os.Getenv` + helpers).
 
-### 8. Externalize Runtime Configuration
+| Env | Default | Purpose |
+|---|---|---|
+| `ADMIN_TOKEN` | required | bearer auth |
+| `PORT` | `8080` | HTTP listen |
+| `STATE_PATH` | `./state.db` | BoltDB file path |
+| `LOG_FORMAT` | `json` | `json` or `text` |
+| `LOG_LEVEL` | `info` | slog level |
+| `ARCADE_BASE_URL` | `https://arcade-v2-us-1.bsvblockchain.tech` | broadcaster |
+| `WOC_BASE_URL` | `https://api.whatsonchain.com/v1/bsv/main` | UTXO source |
+| `NUM_CHAINS` | `10000` | total chains |
+| `FANOUT_SIZE` | `100` | per-fanout outputs |
+| `SUSTAIN_FEE` | `7` | sats per hop |
+| `MAX_TPS` | `10000` | config endpoint upper bound |
+| `BROADCAST_CONCURRENCY` | `64` | semaphore size |
+| `BROADCAST_RETRY_MAX` | `3` | retry attempts |
+| `HTTP_TIMEOUT` | `30s` | client read/write timeout |
+| `SSE_RECONNECT_MIN` | `1s` | backoff floor |
+| `SSE_RECONNECT_MAX` | `30s` | backoff ceiling |
+| `SLACK_WEBHOOK_URL` | — | if set, enables Slack alerts |
+| `SLACK_CHANNEL` | — | target channel |
+| `ENVIRONMENT` | `production` | included in alert messages |
+| `INSTANCE_ID` | hostname | included in alert messages |
 
-Keep current defaults, but move hard-coded operational values to configuration:
+`Config` struct loaded once in `main.go`, passed by pointer to all components. Include
+effective config (secrets redacted) in `/status` output.
 
-- Arcade base URL
-- WOC base URL
-- target chain count, defaulting to 10,000
-- fanout size, defaulting to 100
-- maximum TPS, defaulting to 10,000
-- HTTP timeouts and retry limits
-- health thresholds
-- Slack settings
+### 12. Security Hardening (`server.go`)
 
-Validate configuration at startup and include the effective config in `/status`
-without exposing secrets.
+- `subtle.ConstantTimeCompare([]byte(token), []byte(adminToken)) == 1` for auth.
+- `r.Body = http.MaxBytesReader(w, r.Body, 1024)` before JSON decode on all
+  authenticated endpoints.
+- Reject if `Content-Type` is not `application/json` on POST routes.
+- Log auth failures at `warn` with remote IP; increment `txgen_auth_fail_total`.
+- TLS delegated to reverse proxy (Caddy/nginx) — document this assumption in README.
 
-### 9. Add Focused Tests Before Refactoring
+### 13. SSE Hardening (`sse.go`)
 
-The repo currently has no test files. Add tests around the behavior that must not
-change:
+- Replace fixed 5s reconnect sleep with exponential backoff (`SSE_RECONNECT_MIN` →
+  `SSE_RECONNECT_MAX`), jittered, reset on successful event receipt.
+- Increase `bufio.Scanner` buffer to 1 MiB to handle large reorg events.
+- Use per-request read deadline: a goroutine resets a `time.AfterFunc(60s)` on every
+  line received; fires `resp.Body.Close()` on idle to force reconnect.
+- Increment `txgen_sse_event_total` per event; `txgen_sse_disconnect_total` per
+  reconnect; set `txgen_sse_connected{stream}` gauge.
 
-- transaction fee and output-value calculations
-- generated output count and txid propagation for fanout transactions
-- sustain transaction value decrement and terminal zero-output behavior
-- queue ordering for confirmed and unconfirmed UTXOs
-- `POST /config` auth, validation, and response shape
-- rate controller behavior on start, stop, and TPS changes
-- broadcast retry/result classification with `httptest`
-- bootstrap partial-failure handling
-- Slack notifier deduplication and recovery messages
+### 14. Critical-Path Tests (`tx_test.go`, `engine_test.go` new)
 
-Also add a fake Arcade server for soak and chaos tests: delayed responses, 202s,
-429s, 5xxs, connection resets, duplicate responses, and SSE disconnects.
+**`tx_test.go`**
+- Table tests for `buildFanoutTx`: various input values, assert `len(outputs)==n`,
+  `perOutput*n + fee == inputValue`, txid non-empty, EF bytes parseable.
+- Table tests for `buildSustainTx`: normal decrement, chain-end (value==fee → 0-sat
+  output), zero-value error, invalid txid error.
+- `FuzzBuildSustainTx(f *testing.F)`: fuzz `(txhash, txpos, value)` — no panics,
+  `newUTXO.Value <= utxo.Value`, EF length > 0.
 
-### 10. Add Operator Runbooks
+**`engine_test.go`**
+- `fakeBroadcaster`: records every EF call, configurable error injection.
+- Test `bootstrapFull` (scaled-down: `NUM_CHAINS=4, FANOUT_SIZE=2`): produces 3
+  broadcasts (1 L1 + 2 L2), queue ends with 4 entries.
+- Test `bootstrapL2` resume: starts with `meta=l1_done` + 2 queued UTXOs, skips L1.
+- Test `runChain` termination: chain with `value = sustainFee * N` → N broadcasts then
+  exits; `txgen_chain_terminated_total` increments.
+- Test pause/resume: `SetTPS(0)` → chains block; `SetTPS(>0)` → chains wake via
+  `notify.Broadcast`.
+- Test panic recovery: a broadcaster that panics → `safeGo` recovers, increments
+  `txgen_panic_total`, engine still running.
 
-Document common operations in the repo:
+### 15. Deployment (`Dockerfile`, `.dockerignore` new, README/SKILL update)
 
-- required environment variables
-- start and stop commands
-- how to set TPS with the existing `/config` API
-- how to check liveness, readiness, and detailed status
-- what Slack alerts mean and what to do first
-- how to safely restart and reconcile chain state
-- expected behavior when TPS is 0, when Arcade is degraded, and when WOC is
-  unavailable
+**`Dockerfile`** — multi-stage:
+1. `FROM golang:1.25-alpine AS build` — `CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$VERSION"`.
+2. `FROM gcr.io/distroless/static-debian12:nonroot` — copy binary, `EXPOSE 8080`,
+   `ENTRYPOINT ["/bsv-tx-gen"]`. Volume mount point `VOLUME /data` for `STATE_PATH`.
 
-This does not change the app behavior, but it makes the generator usable by people
-who are not reading the Go source during an incident.
+**`.dockerignore`** — excludes `state.db`, `bsv-tx-gen` binary, `.env`, `.git`.
+
+**Repo hygiene:**
+- Delete committed `bsv-tx-gen` binary from repo.
+- Add `state.db`, `bsv-tx-gen`, `.env` to `.gitignore`.
+
+**README/SKILL additions:** Docker run example with volume mount, all env vars table,
+`/metrics` + `/healthz` + `/readyz` + `/status` docs, ops section (backup `state.db`,
+read panic counter, what `readyz` failure means, Slack alert meanings).
+
+### 16. Operator Runbook (`RUNBOOK.md` new)
+
+Document in the repo:
+
+- Required and optional environment variables.
+- Start/stop commands (bare metal and Docker).
+- How to set TPS, check health, and inspect status.
+- What each Slack alert means and the recommended first action.
+- How to safely restart and reconcile chain state from `state.db`.
+- Expected behavior when TPS is 0, Arcade is degraded, and WoC is unavailable.
+- How to back up and restore `state.db`.
+
+---
 
 ## Priority Order
 
-1. Add tests for current transaction construction, queue behavior, and `/config`.
-2. Add engine state snapshots plus `/healthz`, `/readyz`, and authenticated
-   `/status`.
-3. Add Slack alerting wired to the engine state and failure thresholds.
-4. Replace TPS timing with an immediate central rate controller.
-5. Harden Arcade broadcasts with retries, context, tuned transport, and result
-   classification.
-6. Make bootstrap retryable, auditable, and unhealthy on partial completion.
-7. Add graceful shutdown and lifecycle management.
-8. Externalize configuration while preserving existing defaults.
-9. Add fake-Arcade soak and chaos tests.
-10. Write the operator runbook.
+1. Add tests for current transaction construction and queue behavior.
+2. Add BoltDB persistence; restore queue on restart.
+3. Add engine state snapshots plus `/healthz`, `/readyz`, and authenticated `/status`.
+4. Replace TPS timing with immediate central rate controller.
+5. Harden Arcade broadcasts: context, retries, tuned transport, concurrency semaphore.
+6. Add structured logging (`slog`) and Prometheus `/metrics`.
+7. Add Slack alerting wired to engine state and failure thresholds.
+8. Make bootstrap retryable, auditable, and unhealthy on partial completion.
+9. Add graceful shutdown, `safeGo` panic recovery, and lifecycle management.
+10. Externalize all configuration.
+11. Security hardening: constant-time auth, body limit, content-type check.
+12. SSE hardening: exp backoff, scanner buffer, read deadline.
+13. Docker image, `.dockerignore`, repo hygiene.
+14. Operator runbook.
+
+---
+
+## Files
+
+### New
+- `config.go` — env-driven `Config` struct and loader
+- `store.go` — BoltDB wrapper (`Open`, `SaveUTXO`, `DeleteUTXO`, `LoadAll`, `GetMeta`, `SetMeta`, `Close`)
+- `metrics.go` — prometheus collectors and `RegisterMetrics(mux)`
+- `safe.go` — `safeGo` panic-recovery goroutine helper
+- `httpclient.go` — tuned `http.Transport` factories for arcade/woc and SSE
+- `notifier.go` — Slack webhook notifier with dedup/rate-limit
+- `tx_test.go`, `engine_test.go`
+- `Dockerfile`, `.dockerignore`, `RUNBOOK.md`
+
+### Modified
+- `main.go` — slog init, config load, BoltDB open, signal handling, graceful shutdown
+- `engine.go` — `Broadcaster`/`UTXOSource` interfaces, state model, central rate controller, ctx, semaphore, retries, metrics, `safeGo`
+- `queue.go` — BoltDB write-through
+- `arcade.go` — ctx, retries, tuned transport
+- `woc.go` — ctx, retries, tuned transport
+- `sse.go` — exp backoff, scanner buffer, read deadline, metrics
+- `server.go` — constant-time auth, body limit, content-type check, `*http.Server`, `/metrics`, `/healthz`, `/readyz`, `/status`
+- `tx.go` — expose internals needed by tests
+- `go.mod` — add `go.etcd.io/bbolt`, `github.com/prometheus/client_golang`
+- `README.md`, `SKILL.md` — Docker, all endpoints, ops guidance
+- `.gitignore`, `.env.example` — add `state.db`, `bsv-tx-gen`
+
+---
 
 ## Success Criteria
 
@@ -226,5 +358,8 @@ who are not reading the Go source during an incident.
 - Slack receives actionable, deduplicated issue and recovery reports.
 - TPS changes take effect within seconds, not after old per-chain sleep intervals.
 - A transient Arcade or network failure does not silently reduce chain capacity.
-- The app can run unattended for 24/7 load tests with clear evidence of requested
-  TPS, accepted TPS, failures, and recovery behavior.
+- A crash followed by restart restores UTXO queue from `state.db` without re-bootstrap.
+- The app can run unattended for 24/7 load tests with clear evidence of requested TPS,
+  accepted TPS, failures, and recovery behavior.
+- `go test ./...` passes; `FuzzBuildSustainTx` finds no panics in 30s.
+- `docker build` produces a working image; `docker run` with correct env starts cleanly.
