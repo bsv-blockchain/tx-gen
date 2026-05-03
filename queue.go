@@ -2,7 +2,6 @@ package main
 
 import (
 	"container/heap"
-	"fmt"
 	"sync"
 )
 
@@ -56,6 +55,22 @@ func (q *Queue) SetStore(s *Store) {
 	q.mu.Unlock()
 }
 
+func (q *Queue) PersistAll() error {
+	q.mu.Lock()
+	store := q.store
+	utxos := append([]UTXO(nil), q.h...)
+	q.mu.Unlock()
+	if store == nil {
+		return nil
+	}
+	for _, u := range utxos {
+		if err := store.SaveUTXO(u); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Restore loads all UTXOs from the store into the heap and enables write-through.
 // Call at startup before enqueueing new items; a non-empty result skips WoC fetch.
 func (q *Queue) Restore(store *Store) error {
@@ -77,9 +92,24 @@ func (q *Queue) Push(u UTXO) {
 	_ = q.PushPersisted(u)
 }
 
+func (q *Queue) PushMemory(u UTXO) {
+	q.mu.Lock()
+	heap.Push(&q.h, u)
+	q.mu.Unlock()
+}
+
 func (q *Queue) Pop() (UTXO, bool) {
 	u, ok, _ := q.PopPersisted()
 	return u, ok
+}
+
+func (q *Queue) PopMemory() (UTXO, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.h) == 0 {
+		return UTXO{}, false
+	}
+	return heap.Pop(&q.h).(UTXO), true
 }
 
 func (q *Queue) Len() int {
@@ -115,22 +145,20 @@ func (q *Queue) PopPersisted() (UTXO, bool, error) {
 
 func (q *Queue) UpdateActiveTip(old, new UTXO) error {
 	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.store == nil {
+	store := q.store
+	q.mu.Unlock()
+	if store == nil {
 		return nil
 	}
-	var err error
-	if delErr := q.store.DeleteUTXO(old.TxHash, old.TxPos); delErr != nil {
-		err = delErr
+	return store.CommitPending("", []UTXO{old}, []UTXO{new})
+}
+
+func (q *Queue) CommitPending(txid string, spent, created []UTXO) error {
+	q.mu.Lock()
+	store := q.store
+	q.mu.Unlock()
+	if store == nil {
+		return nil
 	}
-	if new.Value > 0 {
-		if saveErr := q.store.SaveUTXO(new); saveErr != nil {
-			if err != nil {
-				err = fmt.Errorf("%v; %w", err, saveErr)
-			} else {
-				err = saveErr
-			}
-		}
-	}
-	return err
+	return store.CommitPending(txid, spent, created)
 }

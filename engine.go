@@ -132,11 +132,15 @@ type Engine struct {
 }
 
 func newEngine(q *Queue, arcade *arcadeClient, lockScript *script.Script) *Engine {
+	var store *Store
+	if arcade != nil {
+		store = arcade.store
+	}
 	e := &Engine{
 		queue:       q,
 		arcade:      arcade,
 		broadcaster: arcade,
-		store:       arcade.store,
+		store:       store,
 		lockScript:  lockScript,
 		resume:      newNotify(),
 		numChains:   10_000,
@@ -145,17 +149,46 @@ func newEngine(q *Queue, arcade *arcadeClient, lockScript *script.Script) *Engin
 	e.state.Lifecycle = LifecycleStarting
 	e.state.BootstrapStage = "none"
 	e.state.ChainsTarget = 10_000
-	if arcade.store != nil {
+	if store != nil {
 		if q.Len() == 0 {
-			if err := q.Restore(arcade.store); err != nil {
+			if err := q.Restore(store); err != nil {
 				log.Printf("restore queue from store: %v", err)
 			}
 		} else {
-			q.SetStore(arcade.store)
+			q.SetStore(store)
+			if err := q.PersistAll(); err != nil {
+				log.Printf("persist initial queue: %v", err)
+			}
 		}
-		e.replayPending()
+		if changed, err := e.replayPending(); err != nil {
+			log.Printf("replay pending broadcasts: %v", err)
+		} else if changed {
+			if err := q.Restore(store); err != nil {
+				log.Printf("restore queue after pending replay: %v", err)
+			}
+		}
+		if stage, err := store.GetMeta("bootstrap_stage"); err != nil {
+			log.Printf("restore bootstrap stage: %v", err)
+		} else if stage != "" {
+			e.state.BootstrapStage = stage
+			SetBootstrapStage(stage)
+		}
 	}
 	return e
+}
+
+func (e *Engine) configure(numChains, fanoutSize int) {
+	if numChains <= 0 {
+		numChains = 10_000
+	}
+	if fanoutSize <= 0 {
+		fanoutSize = 100
+	}
+	e.numChains = numChains
+	e.fanoutSize = fanoutSize
+	e.setState(func(s *EngineState) {
+		s.ChainsTarget = numChains
+	})
 }
 
 // SetUTXOSource wires in a UTXOSource (WoC or mock) for bootstrap reconciliation.
@@ -272,15 +305,26 @@ func (e *Engine) run(ctx context.Context) {
 	})
 
 	var bootstrapErr error
+	stage := e.Snapshot().BootstrapStage
 	switch {
+	case stage == "l2_done":
+		log.Printf("resuming with %d existing UTXOs", qlen)
+	case stage == "l1_done":
+		log.Printf("bootstrap: L2 fanout from persisted stage (%d → %d)", qlen, e.numChains)
+		bootstrapErr = e.bootstrapL2(ctx)
+	case stage == "l2_partial" || stage == "unknown":
+		bootstrapErr = fmt.Errorf("bootstrap stage %q requires WoC reconciliation before restart", stage)
 	case qlen == 1:
 		log.Printf("bootstrap: L1 + L2 fanout (1 → %d → %d)", e.fanoutSize, e.numChains)
 		bootstrapErr = e.bootstrapFull(ctx)
 	case qlen == e.fanoutSize:
 		log.Printf("bootstrap: L2 fanout only (%d → %d)", e.fanoutSize, e.numChains)
 		bootstrapErr = e.bootstrapL2(ctx)
-	default:
+	case qlen > 0:
 		log.Printf("resuming with %d existing UTXOs", qlen)
+		e.setBootstrapStage("l2_done")
+	default:
+		bootstrapErr = fmt.Errorf("no UTXOs available")
 	}
 
 	if bootstrapErr != nil {
@@ -313,24 +357,34 @@ func (e *Engine) trackTPS(ctx context.Context) {
 
 // bootstrapFull: L0 UTXO → L1 fanout → L2 fanout.
 func (e *Engine) bootstrapFull(ctx context.Context) error {
-	e.setState(func(s *EngineState) { s.BootstrapStage = "none" })
-	e.setMeta("bootstrap_stage", "none")
-	SetBootstrapStage("none")
+	e.setBootstrapStage("none")
 
-	utxo, ok, _ := e.queue.PopPersisted()
+	utxo, ok := e.queue.PopMemory()
 	if !ok {
 		return fmt.Errorf("queue empty")
 	}
 
 	txid, efBytes, l1Outs, buildErr := buildFanoutTx(utxo, e.fanoutSize, e.lockScript)
 	if buildErr != nil {
-		e.queue.Push(utxo)
+		e.queue.PushMemory(utxo)
 		return fmt.Errorf("build L1: %w", buildErr)
+	}
+	for i := range l1Outs {
+		l1Outs[i].TxHash = txid
 	}
 
 	var broadcastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		e.savePending(txid, efBytes)
+		if err := e.savePendingRecord(PendingBroadcast{
+			TxID:    txid,
+			EF:      efBytes,
+			Spent:   []UTXO{utxo},
+			Created: l1Outs,
+			Stage:   "l1_done",
+		}); err != nil {
+			e.queue.PushMemory(utxo)
+			return fmt.Errorf("save L1 pending: %w", err)
+		}
 		if broadcastErr = e.broadcaster.Broadcast(ctx, efBytes); broadcastErr == nil {
 			break
 		}
@@ -338,28 +392,25 @@ func (e *Engine) bootstrapFull(ctx context.Context) error {
 		log.Printf("L1 broadcast attempt %d: %v", attempt, broadcastErr)
 		if attempt < 3 {
 			if err := sleepContext(ctx, retryBackoff(attempt)); err != nil {
-				e.queue.Push(utxo)
+				e.queue.PushMemory(utxo)
 				return err
 			}
 		}
 	}
 	if broadcastErr != nil {
 		e.clearPending(txid)
-		e.queue.Push(utxo)
+		e.queue.PushMemory(utxo)
 		return fmt.Errorf("broadcast L1: %w", broadcastErr)
 	}
 
-	e.clearPending(txid)
-	e.recordBroadcastOk()
-	for i := range l1Outs {
-		l1Outs[i].TxHash = txid
+	if err := e.queue.CommitPending(txid, []UTXO{utxo}, l1Outs); err != nil {
+		return fmt.Errorf("commit L1 broadcast: %w", err)
 	}
-	e.setState(func(s *EngineState) { s.BootstrapStage = "l1_done" })
-	e.setMeta("bootstrap_stage", "l1_done")
-	SetBootstrapStage("l1_done")
+	e.recordBroadcastOk()
+	e.setBootstrapStage("l1_done")
 
 	for _, u := range l1Outs {
-		_ = e.queue.PushPersisted(u)
+		e.queue.PushMemory(u)
 	}
 	return e.bootstrapL2(ctx)
 }
@@ -377,9 +428,11 @@ const (
 
 // bootstrapL2 fans out all queued L1 outputs to create numChains leaf UTXOs.
 func (e *Engine) bootstrapL2(ctx context.Context) error {
+	e.setBootstrapStage("l2_partial")
+
 	var parents []UTXO
 	for {
-		u, ok, _ := e.queue.PopPersisted()
+		u, ok := e.queue.PopMemory()
 		if !ok {
 			break
 		}
@@ -407,11 +460,27 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 				statuses[i].Store(int32(psFailed))
 				results[i] = l2result{err: fmt.Errorf("build %s: %w", parent.TxHash, err)}
 				e.setState(func(s *EngineState) { s.BootstrapFailures++ })
+				e.queue.PushMemory(parent)
 				return
+			}
+			for j := range outs {
+				outs[j].TxHash = txid
 			}
 
 			statuses[i].Store(int32(psBroadcasting))
-			e.savePending(txid, ef)
+			if err := e.savePendingRecord(PendingBroadcast{
+				TxID:    txid,
+				EF:      ef,
+				Spent:   []UTXO{parent},
+				Created: outs,
+				Stage:   "l2_partial",
+			}); err != nil {
+				statuses[i].Store(int32(psFailed))
+				results[i] = l2result{err: fmt.Errorf("save pending %s: %w", parent.TxHash, err)}
+				e.setState(func(s *EngineState) { s.BootstrapFailures++ })
+				e.queue.PushMemory(parent)
+				return
+			}
 
 			var bcastErr error
 			for attempt := 1; attempt <= 3; attempt++ {
@@ -427,18 +496,22 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 				}
 			}
 
-			e.clearPending(txid)
 			if bcastErr != nil {
+				e.clearPending(txid)
 				statuses[i].Store(int32(psFailed))
 				results[i] = l2result{err: fmt.Errorf("broadcast %s: %w", parent.TxHash, bcastErr)}
 				e.setState(func(s *EngineState) { s.BootstrapFailures++ })
+				e.queue.PushMemory(parent)
 				return
 			}
 
-			e.recordBroadcastOk()
-			for j := range outs {
-				outs[j].TxHash = txid
+			if err := e.queue.CommitPending(txid, []UTXO{parent}, outs); err != nil {
+				statuses[i].Store(int32(psFailed))
+				results[i] = l2result{err: fmt.Errorf("commit %s: %w", parent.TxHash, err)}
+				e.setState(func(s *EngineState) { s.BootstrapFailures++ })
+				return
 			}
+			e.recordBroadcastOk()
 			statuses[i].Store(int32(psAccepted))
 			results[i] = l2result{outputs: outs}
 		})
@@ -446,13 +519,15 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 	wg.Wait()
 
 	var failed int
+	var expected []UTXO
 	for i, r := range results {
 		if statuses[i].Load() != int32(psAccepted) {
 			failed++
 			log.Printf("L2 parent %d failed: %v", i, r.err)
 		} else {
 			for _, out := range r.outputs {
-				_ = e.queue.PushPersisted(out)
+				e.queue.PushMemory(out)
+				expected = append(expected, out)
 			}
 		}
 	}
@@ -465,35 +540,50 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 			s.Lifecycle = LifecycleFailed
 			s.LastError = &ErrorRecord{Component: "bootstrap_l2", Msg: msg, Time: time.Now()}
 		})
-		e.setMeta("bootstrap_stage", "l2_partial")
+		e.setBootstrapStage("l2_partial")
+		return fmt.Errorf("%s", msg)
+	}
+	if len(expected) != e.numChains {
+		msg := fmt.Sprintf("bootstrap produced %d L2 UTXOs, expected %d", len(expected), e.numChains)
+		e.setState(func(s *EngineState) {
+			s.Lifecycle = LifecycleFailed
+			s.LastError = &ErrorRecord{Component: "bootstrap_l2", Msg: msg, Time: time.Now()}
+		})
+		e.setBootstrapStage("l2_partial")
 		return fmt.Errorf("%s", msg)
 	}
 
 	if e.source != nil {
 		discovered, rerr := e.source.FetchUTXOs(ctx, scriptHash(e.lockScript))
+		e.setState(func(s *EngineState) {
+			s.LastWoCTime = time.Now()
+			if rerr != nil {
+				s.LastWoCResult = "error"
+			} else {
+				s.LastWoCResult = fmt.Sprintf("%d UTXOs", len(discovered))
+			}
+		})
 		if rerr != nil {
 			e.setState(func(s *EngineState) {
 				s.BootstrapStage = "l2_partial"
 				s.LastError = &ErrorRecord{Component: "woc_reconcile", Msg: rerr.Error(), Time: time.Now()}
 			})
-			e.setMeta("bootstrap_stage", "l2_partial")
+			e.setBootstrapStage("l2_partial")
 			return fmt.Errorf("woc reconcile: %w", rerr)
 		}
-		if len(discovered) < e.numChains {
-			msg := fmt.Sprintf("WoC reports %d UTXOs, expected %d", len(discovered), e.numChains)
+		if missing := missingUTXOs(expected, discovered); len(missing) > 0 {
+			msg := fmt.Sprintf("WoC missing %d expected L2 UTXOs out of %d", len(missing), len(expected))
 			e.setState(func(s *EngineState) {
 				s.Lifecycle = LifecycleDegraded
 				s.BootstrapStage = "l2_partial"
 				s.LastError = &ErrorRecord{Component: "woc_reconcile", Msg: msg, Time: time.Now()}
 			})
-			e.setMeta("bootstrap_stage", "l2_partial")
+			e.setBootstrapStage("l2_partial")
 			return fmt.Errorf("%s", msg)
 		}
 	}
 
-	e.setState(func(s *EngineState) { s.BootstrapStage = "l2_done" })
-	e.setMeta("bootstrap_stage", "l2_done")
-	SetBootstrapStage("l2_done")
+	e.setBootstrapStage("l2_done")
 	return nil
 }
 
@@ -506,7 +596,7 @@ func (e *Engine) startChains(ctx context.Context) {
 	var chainWG sync.WaitGroup
 	count := 0
 	for {
-		utxo, ok, _ := e.queue.PopPersisted()
+		utxo, ok := e.queue.PopMemory()
 		if !ok {
 			break
 		}
@@ -516,7 +606,6 @@ func (e *Engine) startChains(ctx context.Context) {
 		SafeGo(&chainWG, fmt.Sprintf("chain_%d", count), func() {
 			defer func() {
 				remaining := e.chainsActiveCnt.Add(-1)
-				e.chainsExhausted.Add(1)
 				SetChainsActive(int(remaining))
 			}()
 			e.runChain(ctx, u)
@@ -584,22 +673,36 @@ func (e *Engine) runChain(ctx context.Context, utxo UTXO) {
 			log.Printf("sustain build %s:%d: %v", utxo.TxHash, utxo.TxPos, err)
 			continue
 		}
+		newUTXO.TxHash = txid
 
-		e.savePending(txid, efBytes)
+		if err := e.savePendingRecord(PendingBroadcast{
+			TxID:    txid,
+			EF:      efBytes,
+			Spent:   []UTXO{utxo},
+			Created: []UTXO{newUTXO},
+			Stage:   "l2_done",
+		}); err != nil {
+			e.recordBroadcastFail("store", err.Error())
+			log.Printf("sustain pending %s:%d: %v", utxo.TxHash, utxo.TxPos, err)
+			return
+		}
 		if err := e.broadcaster.Broadcast(ctx, efBytes); err != nil {
 			e.clearPending(txid)
 			e.recordBroadcastFail("arcade", err.Error())
 			log.Printf("sustain broadcast %s:%d: %v — retry next tick", utxo.TxHash, utxo.TxPos, err)
 			continue
 		}
-		e.clearPending(txid)
-		e.recordBroadcastOk()
 
-		newUTXO.TxHash = txid
 		if e.queue != nil {
-			_ = e.queue.UpdateActiveTip(utxo, newUTXO)
+			if err := e.queue.CommitPending(txid, []UTXO{utxo}, []UTXO{newUTXO}); err != nil {
+				e.recordBroadcastFail("store", err.Error())
+				log.Printf("sustain commit %s:%d: %v", utxo.TxHash, utxo.TxPos, err)
+				return
+			}
 		}
+		e.recordBroadcastOk()
 		if newUTXO.Value == 0 {
+			e.chainsExhausted.Add(1)
 			IncChainTerminated("exhausted")
 			log.Printf("chain done → %s (chain length %d)", txid, utxo.Value/sustainFee)
 			return
@@ -616,10 +719,17 @@ func (e *Engine) setMeta(key, val string) {
 	}
 }
 
-func (e *Engine) savePending(txid string, ef []byte) {
+func (e *Engine) setBootstrapStage(stage string) {
+	e.setState(func(s *EngineState) { s.BootstrapStage = stage })
+	e.setMeta("bootstrap_stage", stage)
+	SetBootstrapStage(stage)
+}
+
+func (e *Engine) savePendingRecord(p PendingBroadcast) error {
 	if e.store != nil {
-		_ = e.store.SavePending(txid, ef)
+		return e.store.SavePendingRecord(p)
 	}
+	return nil
 }
 
 func (e *Engine) clearPending(txid string) {
@@ -628,12 +738,51 @@ func (e *Engine) clearPending(txid string) {
 	}
 }
 
-func (e *Engine) replayPending() {
+func (e *Engine) replayPending() (bool, error) {
 	if e.store == nil {
-		return
+		return false, nil
 	}
-	pend, _ := e.store.LoadPending()
-	for txid := range pend {
-		_ = e.store.ClearPending(txid)
+	pend, err := e.store.LoadPending()
+	if err != nil {
+		return false, err
 	}
+	var changed bool
+	var unknown int
+	for txid, p := range pend {
+		if len(p.Spent) == 0 && len(p.Created) == 0 {
+			unknown++
+			continue
+		}
+		if err := e.store.CommitPending(txid, p.Spent, p.Created); err != nil {
+			return changed, err
+		}
+		changed = true
+		if p.Stage != "" {
+			e.setBootstrapStage(p.Stage)
+		}
+	}
+	if unknown > 0 {
+		msg := fmt.Sprintf("%d pending broadcasts require WoC reconciliation", unknown)
+		e.setState(func(s *EngineState) {
+			s.BootstrapStage = "unknown"
+			s.LastError = &ErrorRecord{Component: "pending_replay", Msg: msg, Time: time.Now()}
+		})
+		e.setMeta("bootstrap_stage", "unknown")
+		SetBootstrapStage("unknown")
+	}
+	return changed, nil
+}
+
+func missingUTXOs(expected, discovered []UTXO) []UTXO {
+	found := make(map[string]struct{}, len(discovered))
+	for _, u := range discovered {
+		found[utxoKey(u.TxHash, u.TxPos)] = struct{}{}
+	}
+	var missing []UTXO
+	for _, u := range expected {
+		if _, ok := found[utxoKey(u.TxHash, u.TxPos)]; !ok {
+			missing = append(missing, u)
+		}
+	}
+	return missing
 }

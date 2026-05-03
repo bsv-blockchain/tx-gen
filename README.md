@@ -77,7 +77,7 @@ docker run -d -p 8080:8080 -v $(pwd)/data:/data \
   bsv-tx-gen
 ```
 
-Volume mount for `state.db` persistence across restarts.
+Volume mount for `state.db` persistence across restarts. Terminate TLS at a reverse proxy such as Caddy or nginx; the service itself listens HTTP.
 
 ## Full Environment Variables
 
@@ -109,7 +109,8 @@ See RUNBOOK.md for complete table. Key ops vars:
 - Resume: `POST /config -d '{"tps":16}'`
 - Check degraded: `curl /status | jq .state`
 - Reorg evidence: logs "reorg", `/metrics` txgen_reorg_total, Slack post (if webhook), `/status.lastReorg`
-- Restart with resume: keep `state.db` (queue + pending replay, no re-bootstrap)
+- Restart with resume: keep `state.db` (active tips + structured pending replay, no re-bootstrap after `l2_done`)
+- Bootstrap `l2_partial` or `unknown`: keep `state.db`, check `/status.lastError`, and reconcile with WoC before restarting generation
 
 ## Reorg Case-Study Note
 

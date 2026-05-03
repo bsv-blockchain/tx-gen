@@ -7,6 +7,7 @@ import (
 	"go.etcd.io/bbolt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 var (
@@ -17,6 +18,15 @@ var (
 
 type Store struct {
 	db *bbolt.DB
+}
+
+type PendingBroadcast struct {
+	TxID    string
+	EF      []byte
+	Spent   []UTXO
+	Created []UTXO
+	Stage   string
+	SavedAt time.Time
 }
 
 func NewStore(path string) (*Store, error) {
@@ -50,11 +60,11 @@ func (s *Store) SaveUTXO(utxo UTXO) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketUTXOs)
 		key := []byte(utxoKey(utxo.TxHash, utxo.TxPos))
-		var buf bytes.Buffer
-		if err := gob.NewEncoder(&buf).Encode(utxo); err != nil {
+		encoded, err := encodeGob(utxo)
+		if err != nil {
 			return err
 		}
-		return b.Put(key, buf.Bytes())
+		return b.Put(key, encoded)
 	})
 }
 
@@ -103,9 +113,23 @@ func (s *Store) SetMeta(key, val string) error {
 }
 
 func (s *Store) SavePending(txid string, ef []byte) error {
+	return s.SavePendingRecord(PendingBroadcast{TxID: txid, EF: ef})
+}
+
+func (s *Store) SavePendingRecord(p PendingBroadcast) error {
+	if p.TxID == "" {
+		return fmt.Errorf("pending txid is required")
+	}
+	if p.SavedAt.IsZero() {
+		p.SavedAt = time.Now().UTC()
+	}
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketPending)
-		return b.Put([]byte(txid), ef)
+		encoded, err := encodeGob(p)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(p.TxID), encoded)
 	})
 }
 
@@ -116,16 +140,56 @@ func (s *Store) ClearPending(txid string) error {
 	})
 }
 
-func (s *Store) LoadPending() (map[string][]byte, error) {
-	pend := make(map[string][]byte)
+func (s *Store) LoadPending() (map[string]PendingBroadcast, error) {
+	pend := make(map[string]PendingBroadcast)
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketPending)
 		return b.ForEach(func(k, v []byte) error {
-			pend[string(k)] = append([]byte(nil), v...)
+			var p PendingBroadcast
+			if err := gob.NewDecoder(bytes.NewReader(v)).Decode(&p); err != nil {
+				p = PendingBroadcast{
+					TxID: string(k),
+					EF:   append([]byte(nil), v...),
+				}
+			}
+			if p.TxID == "" {
+				p.TxID = string(k)
+			}
+			pend[string(k)] = p
 			return nil
 		})
 	})
 	return pend, err
+}
+
+func (s *Store) CommitPending(txid string, spent, created []UTXO) error {
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		utxos := tx.Bucket(bucketUTXOs)
+		pending := tx.Bucket(bucketPending)
+		if txid != "" {
+			if err := pending.Delete([]byte(txid)); err != nil {
+				return err
+			}
+		}
+		for _, u := range spent {
+			if err := utxos.Delete([]byte(utxoKey(u.TxHash, u.TxPos))); err != nil {
+				return err
+			}
+		}
+		for _, u := range created {
+			if u.Value == 0 {
+				continue
+			}
+			encoded, err := encodeGob(u)
+			if err != nil {
+				return err
+			}
+			if err := utxos.Put([]byte(utxoKey(u.TxHash, u.TxPos)), encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *Store) Close() error {
@@ -134,4 +198,12 @@ func (s *Store) Close() error {
 
 func utxoKey(txid string, vout uint32) string {
 	return fmt.Sprintf("%s:%d", txid, vout)
+}
+
+func encodeGob(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(v); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }

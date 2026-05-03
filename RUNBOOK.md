@@ -69,9 +69,14 @@ Periodic: rsync or volume snapshot of /data/state.db
 
 Restore: place state.db before start, engine resumes without full bootstrap if data present.
 
+If bootstrapStage is l2_partial or unknown after a crash, do not delete state.db or force
+restart from WoC. Keep the DB, inspect /status lastError, and reconcile the OP_NOP4
+outpoints with WoC; the engine intentionally stays not-ready rather than risking a
+stale double-spend.
+
 ## Degraded States
 
-- degraded: if TPS under-delivery or bootstrap partial
+- degraded: if TPS under-delivery or bootstrap reconciliation fails
 - First actions: check /status, logs for lastError, increase MAX_TPS? check Arcade health.
 
 ## Collecting Reorg Evidence

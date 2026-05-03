@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -102,8 +103,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.TPS < 0 || req.TPS > 10000 {
-		http.Error(w, "tps must be 0-10000", http.StatusBadRequest)
+	maxTPS := int64(10000)
+	if s.cfg != nil && s.cfg.MaxTPS > 0 {
+		maxTPS = int64(s.cfg.MaxTPS)
+	}
+	if req.TPS < 0 || req.TPS > maxTPS {
+		http.Error(w, "tps must be 0-"+strconv.FormatInt(maxTPS, 10), http.StatusBadRequest)
 		return
 	}
 

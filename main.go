@@ -66,6 +66,7 @@ func main() {
 
 	arcade := newArcadeClientWithConfig(cfg, store, logger)
 	engine := newEngine(q, arcade, lockScript)
+	engine.configure(cfg.NumChains, cfg.FanoutSize)
 	engine.SetUTXOSource(woc)
 	server := newServerWithConfig(engine, cfg, store, logger)
 	var notifier *Notifier
