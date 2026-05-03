@@ -1,2 +1,5 @@
 .env
 bsv-tx-gen
+state.db
+*.db
+ARCHITECTURE.html

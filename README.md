@@ -63,3 +63,59 @@ Valid range: `0`–`10000`. Setting `0` pauses all chains without losing state.
 | Chain length | `value / 7` txs | ~142 txs |
 | Interval per chain at 16 TPS | `10000 / 16` ≈ 625 s | ~10 min |
 | Sustained TPS with 10k chains | `10000 / interval` | 16 TPS |
+
+## Docker
+
+Multi-stage build to distroless image.
+
+```sh
+docker build -t bsv-tx-gen .
+docker run -d -p 8080:8080 -v $(pwd)/data:/data \
+  -e ADMIN_TOKEN=your-secret \
+  -e STATE_PATH=/data/state.db \
+  -e SLACK_WEBHOOK_URL=https://hooks.slack... \
+  bsv-tx-gen
+```
+
+Volume mount for `state.db` persistence across restarts.
+
+## Full Environment Variables
+
+See RUNBOOK.md for complete table. Key ops vars:
+
+| Env var | Default | Notes |
+|---------|---------|-------|
+| `STATE_PATH` | `./state.db` | BoltDB location; backup before restart |
+| `NUM_CHAINS` | `10000` | Target chains (fanout * sustain) |
+| `FANOUT_SIZE` | `100` | L1 fanout width |
+| `SUSTAIN_FEE` | `1000` | Satoshis per sustain hop |
+| `MAX_TPS` | `1000` | Hard cap (degrade if requested > capacity) |
+| `SLACK_WEBHOOK_URL` | (empty) | Enables alerts + reorg case-study posts |
+| `ENVIRONMENT` | `dev` | Tags all Slack / logs |
+| `INSTANCE_ID` | `local` | Unique per deployment for dedupe |
+
+## Endpoints
+
+- `GET /healthz` — 200 liveness (always after start)
+- `GET /readyz` — 200 after bootstrap complete
+- `GET /status` — EngineState snapshot (TPS, chains, lastReorg, bootstrapStage, lastError)
+- `GET /metrics` — Prometheus (txgen_broadcast_total, txgen_reorg_total{depth}, queue_depth, chains_active, tps_target, panic_total etc.)
+- `POST /admin/tps` — SetTPS (auth: Bearer ADMIN_TOKEN)
+
+## Ops Quick Reference
+
+- Pause: `POST /admin/tps {"tps":0}`
+- Resume: `POST /admin/tps {"tps":16}`
+- Check degraded: `curl /status | jq .state`
+- Reorg evidence: logs "reorg", `/metrics` txgen_reorg_total, Slack post (if webhook), `/status.lastReorg`
+- Restart with resume: keep `state.db` (queue + pending replay, no re-bootstrap)
+
+## Reorg Case-Study Note
+
+Every mainnet reorg produces:
+- Structured info log with height/depth/chains/tips
+- `txgen_reorg_total{depth=...}` increment
+- Optional Slack informational post (different channel tone)
+- Snapshot in EngineState for `/status`
+
+This data is rare and valuable — collected automatically for post-mortem analysis.

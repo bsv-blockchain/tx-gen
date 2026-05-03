@@ -1,0 +1,7 @@
+state.db
+*.db
+bsv-tx-gen
+.env
+.git
+.github
+*.html
