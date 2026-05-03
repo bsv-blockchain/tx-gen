@@ -186,6 +186,7 @@ func (s *Server) authorized(r *http.Request) bool {
 }
 
 func (s *Server) authFailed(r *http.Request) {
+	IncAuthFail()
 	s.logger.Warn("auth failed", "remote", r.RemoteAddr, "path", r.URL.Path, "method", r.Method)
 }
 
@@ -210,13 +211,6 @@ func (s *Server) readiness(ctx context.Context) (bool, map[string]any) {
 		}
 	} else if s.engine != nil && s.engine.queue != nil {
 		checks["queueDepth"] = s.engine.queue.Len()
-	}
-
-	if stage := s.bootstrapStage(); stage != "" {
-		checks["bootstrapStage"] = stage
-		if stage != "l2_done" {
-			ready = false
-		}
 	}
 
 	if err := s.arcadeReachable(ctx); err != nil {

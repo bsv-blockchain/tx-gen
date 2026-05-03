@@ -173,7 +173,8 @@ func streamLoop(ctx context.Context, client *http.Client, url, name string, reco
 		}
 		if err := connectStream(ctx, client, url, name, logger, handler); err != nil && ctx.Err() == nil {
 			attempt++
-			SetSSEConnected(false)
+			IncSSEDisconnect(name)
+			SetSSEConnected(false, name)
 			delay := reconnectDelay(reconnectMin, reconnectMax, attempt)
 			logger.Warn("SSE disconnected", "stream", name, "error", err, "reconnect_in", delay)
 			select {
@@ -210,8 +211,9 @@ func connectStream(ctx context.Context, client *http.Client, url, name string, l
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 
-	SetSSEConnected(true)
-	defer SetSSEConnected(false)
+	IncSSEEvent(name)
+	SetSSEConnected(true, name)
+	defer SetSSEConnected(false, name)
 	logger.Info("SSE connected", "stream", name)
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)

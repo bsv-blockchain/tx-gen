@@ -1,11 +1,13 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
-	sdktx "github.com/bsv-blockchain/go-sdk/transaction"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/script"
+	sdktx "github.com/bsv-blockchain/go-sdk/transaction"
 )
 
 // sustainFee: ceil(62 bytes × 100 sat/KB) = 7 sats.
@@ -108,4 +110,12 @@ func buildSustainTx(utxo UTXO, lockScript *script.Script) (txid string, efBytes 
 	}
 
 	return tx.TxID().String(), ef, UTXO{TxPos: 0, Value: outValue}, nil
+}
+
+func scriptHash(s *script.Script) string {
+	h := sha256.Sum256(*s)
+	for i, j := 0, len(h)-1; i < j; i, j = i+1, j-1 {
+		h[i], h[j] = h[j], h[i]
+	}
+	return hex.EncodeToString(h[:])
 }

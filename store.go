@@ -116,6 +116,18 @@ func (s *Store) ClearPending(txid string) error {
 	})
 }
 
+func (s *Store) LoadPending() (map[string][]byte, error) {
+	pend := make(map[string][]byte)
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketPending)
+		return b.ForEach(func(k, v []byte) error {
+			pend[string(k)] = append([]byte(nil), v...)
+			return nil
+		})
+	})
+	return pend, err
+}
+
 func (s *Store) Close() error {
 	return s.db.Close()
 }

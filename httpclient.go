@@ -25,12 +25,12 @@ func ArcadeTransport() *http.Transport {
 func SSETransport() *http.Transport {
 	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
 	return &http.Transport{
-		MaxIdleConnsPerHost: 32,
-		MaxIdleConns:        64,
-		IdleConnTimeout:     90 * time.Second,
-		DialContext:         dialer.DialContext,
-		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
-		TLSHandshakeTimeout: 10 * time.Second,
+		MaxIdleConnsPerHost:   32,
+		MaxIdleConns:          64,
+		IdleConnTimeout:       90 * time.Second,
+		DialContext:           dialer.DialContext,
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 0,
 	}
 }

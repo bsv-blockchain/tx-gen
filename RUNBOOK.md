@@ -3,27 +3,27 @@
 ## Environment Variables
 
 Required:
-- ADMIN_TOKEN: secret for /admin endpoints
+- ADMIN_TOKEN: bearer token for POST /config and GET /status
 
 Optional with defaults:
 - PORT=8080
 - STATE_PATH=./state.db
 - LOG_LEVEL=info
-- LOG_FORMAT=text
+- LOG_FORMAT=json
 - ARCADE_BASE_URL=https://arcade-v2-us-1.bsvblockchain.tech
 - WOC_BASE_URL=https://api.whatsonchain.com/v1/bsv/main
 - NUM_CHAINS=10000
 - FANOUT_SIZE=100
-- SUSTAIN_FEE=1000
-- MAX_TPS=1000
-- BROADCAST_CONCURRENCY=256
-- BROADCAST_RETRY_MAX=5
+- SUSTAIN_FEE=7
+- MAX_TPS=10000
+- BROADCAST_CONCURRENCY=64
+- BROADCAST_RETRY_MAX=3
 - HTTP_TIMEOUT=30s
-- SSE_RECONNECT_INITIAL=1s
+- SSE_RECONNECT_MIN=1s
 - SSE_RECONNECT_MAX=30s
 - SLACK_WEBHOOK_URL= (empty = no Slack)
 - SLACK_CHANNEL=#alerts
-- ENVIRONMENT=dev
+- ENVIRONMENT=production
 - INSTANCE_ID=local
 
 ## Start / Stop
@@ -46,7 +46,8 @@ Stop with SIGINT/SIGTERM.
 - GET /readyz : readiness (after bootstrap)
 - GET /status : JSON snapshot of engine state, redacted config
 - GET /metrics : Prometheus metrics including txgen_reorg_total{depth}
-- POST /admin/tps : set target TPS (auth with ADMIN_TOKEN)
+- POST /config : set target TPS (auth Bearer ADMIN_TOKEN, body {"tps":N})
+- POST /stop : optional alias for {"tps":0}
 
 ## Slack Alerts vs Notable Events
 

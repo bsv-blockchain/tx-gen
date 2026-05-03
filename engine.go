@@ -146,9 +146,14 @@ func newEngine(q *Queue, arcade *arcadeClient, lockScript *script.Script) *Engin
 	e.state.BootstrapStage = "none"
 	e.state.ChainsTarget = 10_000
 	if arcade.store != nil {
-		if err := q.Restore(arcade.store); err != nil {
-			log.Printf("restore queue from store: %v", err)
+		if q.Len() == 0 {
+			if err := q.Restore(arcade.store); err != nil {
+				log.Printf("restore queue from store: %v", err)
+			}
+		} else {
+			q.SetStore(arcade.store)
 		}
+		e.replayPending()
 	}
 	return e
 }
@@ -215,7 +220,6 @@ func (e *Engine) RecordReorg(height, depth int, tipBefore, tipAfter string) {
 		TipAfter:       tipAfter,
 	}
 	e.setState(func(s *EngineState) { s.LastReorg = r })
-	IncReorg(depth)
 }
 
 // RecordTip is called by sse.go via reflection on tip events.
@@ -285,7 +289,6 @@ func (e *Engine) run(ctx context.Context) {
 			s.Lifecycle = LifecycleFailed
 			s.LastError = &ErrorRecord{Component: "bootstrap", Msg: bootstrapErr.Error(), Time: time.Now()}
 		})
-		infraWG.Wait()
 		return
 	}
 
@@ -314,7 +317,7 @@ func (e *Engine) bootstrapFull(ctx context.Context) error {
 	e.setMeta("bootstrap_stage", "none")
 	SetBootstrapStage("none")
 
-	utxo, ok := e.queue.Pop()
+	utxo, ok, _ := e.queue.PopPersisted()
 	if !ok {
 		return fmt.Errorf("queue empty")
 	}
@@ -351,14 +354,12 @@ func (e *Engine) bootstrapFull(ctx context.Context) error {
 	for i := range l1Outs {
 		l1Outs[i].TxHash = txid
 	}
-	log.Printf("L1 tx: %s (%d outputs @ %d sats each)", txid, e.fanoutSize, l1Outs[0].Value)
-
 	e.setState(func(s *EngineState) { s.BootstrapStage = "l1_done" })
 	e.setMeta("bootstrap_stage", "l1_done")
 	SetBootstrapStage("l1_done")
 
 	for _, u := range l1Outs {
-		e.queue.Push(u)
+		_ = e.queue.PushPersisted(u)
 	}
 	return e.bootstrapL2(ctx)
 }
@@ -378,7 +379,7 @@ const (
 func (e *Engine) bootstrapL2(ctx context.Context) error {
 	var parents []UTXO
 	for {
-		u, ok := e.queue.Pop()
+		u, ok, _ := e.queue.PopPersisted()
 		if !ok {
 			break
 		}
@@ -451,7 +452,7 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 			log.Printf("L2 parent %d failed: %v", i, r.err)
 		} else {
 			for _, out := range r.outputs {
-				e.queue.Push(out)
+				_ = e.queue.PushPersisted(out)
 			}
 		}
 	}
@@ -466,6 +467,28 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 		})
 		e.setMeta("bootstrap_stage", "l2_partial")
 		return fmt.Errorf("%s", msg)
+	}
+
+	if e.source != nil {
+		discovered, rerr := e.source.FetchUTXOs(ctx, scriptHash(e.lockScript))
+		if rerr != nil {
+			e.setState(func(s *EngineState) {
+				s.BootstrapStage = "l2_partial"
+				s.LastError = &ErrorRecord{Component: "woc_reconcile", Msg: rerr.Error(), Time: time.Now()}
+			})
+			e.setMeta("bootstrap_stage", "l2_partial")
+			return fmt.Errorf("woc reconcile: %w", rerr)
+		}
+		if len(discovered) < e.numChains {
+			msg := fmt.Sprintf("WoC reports %d UTXOs, expected %d", len(discovered), e.numChains)
+			e.setState(func(s *EngineState) {
+				s.Lifecycle = LifecycleDegraded
+				s.BootstrapStage = "l2_partial"
+				s.LastError = &ErrorRecord{Component: "woc_reconcile", Msg: msg, Time: time.Now()}
+			})
+			e.setMeta("bootstrap_stage", "l2_partial")
+			return fmt.Errorf("%s", msg)
+		}
 	}
 
 	e.setState(func(s *EngineState) { s.BootstrapStage = "l2_done" })
@@ -483,7 +506,7 @@ func (e *Engine) startChains(ctx context.Context) {
 	var chainWG sync.WaitGroup
 	count := 0
 	for {
-		utxo, ok := e.queue.Pop()
+		utxo, ok, _ := e.queue.PopPersisted()
 		if !ok {
 			break
 		}
@@ -573,7 +596,11 @@ func (e *Engine) runChain(ctx context.Context, utxo UTXO) {
 		e.recordBroadcastOk()
 
 		newUTXO.TxHash = txid
+		if e.queue != nil {
+			_ = e.queue.UpdateActiveTip(utxo, newUTXO)
+		}
 		if newUTXO.Value == 0 {
+			IncChainTerminated("exhausted")
 			log.Printf("chain done → %s (chain length %d)", txid, utxo.Value/sustainFee)
 			return
 		}
@@ -597,6 +624,16 @@ func (e *Engine) savePending(txid string, ef []byte) {
 
 func (e *Engine) clearPending(txid string) {
 	if e.store != nil {
+		_ = e.store.ClearPending(txid)
+	}
+}
+
+func (e *Engine) replayPending() {
+	if e.store == nil {
+		return
+	}
+	pend, _ := e.store.LoadPending()
+	for txid := range pend {
 		_ = e.store.ClearPending(txid)
 	}
 }

@@ -17,7 +17,7 @@ func TestBuildFanoutTx(t *testing.T) {
 	}{
 		{"normal_4out", 10_000, 4, false},
 		{"minimal_2out", 100, 2, false},
-		{"too_small_fee", 5, 2, true},  // 5 <= fee(8)
+		{"too_small_fee", 5, 2, true},   // 5 <= fee(8)
 		{"zero_per_output", 9, 2, true}, // (9-8)/2 == 0
 	}
 
@@ -72,8 +72,8 @@ func TestBuildSustainTx(t *testing.T) {
 		wantValue uint64
 	}{
 		{"normal", 100, false, 100 - sustainFee},
-		{"chain_end_equal", sustainFee, false, 0},     // value == fee → output 0
-		{"chain_end_less", sustainFee - 1, false, 0},  // value < fee → output 0
+		{"chain_end_equal", sustainFee, false, 0},    // value == fee → output 0
+		{"chain_end_less", sustainFee - 1, false, 0}, // value < fee → output 0
 		{"zero_value", 0, true, 0},
 	}
 

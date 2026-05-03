@@ -2,6 +2,7 @@ package main
 
 import (
 	"container/heap"
+	"fmt"
 	"sync"
 )
 
@@ -63,6 +64,7 @@ func (q *Queue) Restore(store *Store) error {
 		return err
 	}
 	q.mu.Lock()
+	q.h = q.h[:0]
 	q.store = store
 	for _, u := range utxos {
 		heap.Push(&q.h, u)
@@ -72,29 +74,63 @@ func (q *Queue) Restore(store *Store) error {
 }
 
 func (q *Queue) Push(u UTXO) {
-	q.mu.Lock()
-	heap.Push(&q.h, u)
-	if q.store != nil {
-		_ = q.store.SaveUTXO(u)
-	}
-	q.mu.Unlock()
+	_ = q.PushPersisted(u)
 }
 
 func (q *Queue) Pop() (UTXO, bool) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.h) == 0 {
-		return UTXO{}, false
-	}
-	u := heap.Pop(&q.h).(UTXO)
-	if q.store != nil {
-		_ = q.store.DeleteUTXO(u.TxHash, u.TxPos)
-	}
-	return u, true
+	u, ok, _ := q.PopPersisted()
+	return u, ok
 }
 
 func (q *Queue) Len() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.h)
+}
+
+func (q *Queue) PushPersisted(u UTXO) error {
+	q.mu.Lock()
+	heap.Push(&q.h, u)
+	var err error
+	if q.store != nil {
+		err = q.store.SaveUTXO(u)
+	}
+	q.mu.Unlock()
+	return err
+}
+
+func (q *Queue) PopPersisted() (UTXO, bool, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.h) == 0 {
+		return UTXO{}, false, nil
+	}
+	u := heap.Pop(&q.h).(UTXO)
+	var err error
+	if q.store != nil {
+		err = q.store.DeleteUTXO(u.TxHash, u.TxPos)
+	}
+	return u, true, err
+}
+
+func (q *Queue) UpdateActiveTip(old, new UTXO) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.store == nil {
+		return nil
+	}
+	var err error
+	if delErr := q.store.DeleteUTXO(old.TxHash, old.TxPos); delErr != nil {
+		err = delErr
+	}
+	if new.Value > 0 {
+		if saveErr := q.store.SaveUTXO(new); saveErr != nil {
+			if err != nil {
+				err = fmt.Errorf("%v; %w", err, saveErr)
+			} else {
+				err = saveErr
+			}
+		}
+	}
+	return err
 }

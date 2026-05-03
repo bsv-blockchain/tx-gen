@@ -88,10 +88,10 @@ See RUNBOOK.md for complete table. Key ops vars:
 | `STATE_PATH` | `./state.db` | BoltDB location; backup before restart |
 | `NUM_CHAINS` | `10000` | Target chains (fanout * sustain) |
 | `FANOUT_SIZE` | `100` | L1 fanout width |
-| `SUSTAIN_FEE` | `1000` | Satoshis per sustain hop |
-| `MAX_TPS` | `1000` | Hard cap (degrade if requested > capacity) |
+| `SUSTAIN_FEE` | `7` | Satoshis per sustain hop |
+| `MAX_TPS` | `10000` | Hard cap (degrade if requested > capacity) |
 | `SLACK_WEBHOOK_URL` | (empty) | Enables alerts + reorg case-study posts |
-| `ENVIRONMENT` | `dev` | Tags all Slack / logs |
+| `ENVIRONMENT` | `production` | Tags all Slack / logs |
 | `INSTANCE_ID` | `local` | Unique per deployment for dedupe |
 
 ## Endpoints
@@ -100,12 +100,13 @@ See RUNBOOK.md for complete table. Key ops vars:
 - `GET /readyz` — 200 after bootstrap complete
 - `GET /status` — EngineState snapshot (TPS, chains, lastReorg, bootstrapStage, lastError)
 - `GET /metrics` — Prometheus (txgen_broadcast_total, txgen_reorg_total{depth}, queue_depth, chains_active, tps_target, panic_total etc.)
-- `POST /admin/tps` — SetTPS (auth: Bearer ADMIN_TOKEN)
-
+- `POST /config` — SetTPS (auth: Bearer ADMIN_TOKEN, body `{"tps": N}`)
+- `POST /stop` — convenience alias for `{"tps":0}` (optional)
+ 
 ## Ops Quick Reference
-
-- Pause: `POST /admin/tps {"tps":0}`
-- Resume: `POST /admin/tps {"tps":16}`
+ 
+- Pause: `POST /config -d '{"tps":0}'`
+- Resume: `POST /config -d '{"tps":16}'`
 - Check degraded: `curl /status | jq .state`
 - Reorg evidence: logs "reorg", `/metrics` txgen_reorg_total, Slack post (if webhook), `/status.lastReorg`
 - Restart with resume: keep `state.db` (queue + pending replay, no re-bootstrap)

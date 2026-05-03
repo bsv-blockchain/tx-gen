@@ -20,9 +20,6 @@ type Notifier struct {
 }
 
 func NewNotifier(c *Config) *Notifier {
-	if c.SlackWebhookURL == "" {
-		return &Notifier{}
-	}
 	return &Notifier{
 		webhook:  c.SlackWebhookURL,
 		channel:  c.SlackChannel,
@@ -48,8 +45,8 @@ func (n *Notifier) post(msg string, isReorg bool) {
 		return
 	}
 	payload := map[string]interface{}{
-		"text":     msg,
-		"channel":  n.channel,
+		"text":    msg,
+		"channel": n.channel,
 	}
 	if isReorg {
 		payload["username"] = "txgen-reorg"

@@ -9,5 +9,4 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /bsv-tx-gen /bsv-tx-gen
 EXPOSE 8080
 VOLUME ["/data"]
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/bsv-tx-gen", "-health"] || exit 1
 ENTRYPOINT ["/bsv-tx-gen"]

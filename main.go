@@ -66,6 +66,7 @@ func main() {
 
 	arcade := newArcadeClientWithConfig(cfg, store, logger)
 	engine := newEngine(q, arcade, lockScript)
+	engine.SetUTXOSource(woc)
 	server := newServerWithConfig(engine, cfg, store, logger)
 	var notifier *Notifier
 	if cfg.SlackWebhookURL != "" {
