@@ -23,10 +23,6 @@ type arcadeClient struct {
 	store       *Store
 }
 
-func newArcadeClient() *arcadeClient {
-	return newArcadeClientWithConfig(nil, nil, slog.Default())
-}
-
 func newArcadeClientWithConfig(cfg *Config, store *Store, logger *slog.Logger) *arcadeClient {
 	if logger == nil {
 		logger = slog.Default()
@@ -55,12 +51,6 @@ func newArcadeClientWithConfig(cfg *Config, store *Store, logger *slog.Logger) *
 		logger:      logger,
 		store:       store,
 	}
-}
-
-// broadcast sends an EF-encoded transaction to arcade.
-// The txid must be computed by the caller via computeTxID before calling this.
-func (c *arcadeClient) broadcast(efBytes []byte) error {
-	return c.Broadcast(context.Background(), efBytes)
 }
 
 func (c *arcadeClient) Broadcast(ctx context.Context, efBytes []byte) error {
@@ -148,7 +138,9 @@ func (c *arcadeClient) postEF(ctx context.Context, efBytes []byte) (int, string,
 	if err != nil {
 		return 0, "", err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	return resp.StatusCode, string(body), nil
@@ -166,7 +158,9 @@ func (c *arcadeClient) Reachable(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 500 {
 		return fmt.Errorf("arcade status %d", resp.StatusCode)
 	}

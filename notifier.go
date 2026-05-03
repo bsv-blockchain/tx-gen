@@ -53,8 +53,19 @@ func (n *Notifier) post(msg string, isReorg bool) {
 	} else {
 		payload["username"] = "txgen-alert"
 	}
-	b, _ := json.Marshal(payload)
-	http.Post(n.webhook, "application/json", bytes.NewReader(b))
+	b, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("notifier marshal: %v", err)
+		return
+	}
+	resp, err := http.Post(n.webhook, "application/json", bytes.NewReader(b))
+	if err != nil {
+		log.Printf("notifier post: %v", err)
+		return
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 }
 
 func (n *Notifier) logStructured(fields map[string]interface{}) {

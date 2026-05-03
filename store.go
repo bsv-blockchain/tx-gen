@@ -50,7 +50,9 @@ func NewStore(path string) (*Store, error) {
 		return nil
 	})
 	if err != nil {
-		db.Close()
+		if closeErr := db.Close(); closeErr != nil {
+			return nil, fmt.Errorf("%w; close db: %v", err, closeErr)
+		}
 		return nil, err
 	}
 	return &Store{db: db}, nil

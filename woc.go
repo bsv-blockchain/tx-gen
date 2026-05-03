@@ -22,10 +22,6 @@ type wocClient struct {
 	logger   *slog.Logger
 }
 
-func newWOCClient() *wocClient {
-	return newWOCClientWithConfig(nil, slog.Default())
-}
-
 func newWOCClientWithConfig(cfg *Config, logger *slog.Logger) *wocClient {
 	if logger == nil {
 		logger = slog.Default()
@@ -64,10 +60,6 @@ func scriptToHash(s *script.Script) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (c *wocClient) fetchUnspent(scriptHash string) ([]UTXO, error) {
-	return c.FetchUTXOs(context.Background(), scriptHash)
-}
-
 func (c *wocClient) FetchUTXOs(ctx context.Context, scriptHash string) ([]UTXO, error) {
 	url := fmt.Sprintf("%s/script/%s/unspent/all", c.base, scriptHash)
 	var lastErr error
@@ -98,7 +90,9 @@ func (c *wocClient) fetchUTXOsOnce(ctx context.Context, url string) ([]UTXO, boo
 	if err != nil {
 		return nil, ctx.Err() == nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {

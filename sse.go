@@ -37,11 +37,6 @@ type ReorgEvent struct {
 	Depth          uint32       `json:"depth"`
 }
 
-// subscribeSSE starts goroutines for both arcade SSE streams and reconnects on drop.
-func subscribeSSE(ctx context.Context) {
-	startSSESubscribers(ctx, nil, nil, slog.Default(), nil, nil)
-}
-
 func startSSESubscribers(ctx context.Context, engine *Engine, cfg *Config, logger *slog.Logger, notifier *Notifier, wg *sync.WaitGroup) {
 	if logger == nil {
 		logger = slog.Default()
@@ -205,7 +200,9 @@ func connectStream(ctx context.Context, client *http.Client, url, name string, l
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("status %d", resp.StatusCode)
@@ -225,17 +222,17 @@ func connectStream(ctx context.Context, client *http.Client, url, name string, l
 	for scanner.Scan() {
 		signalActivity(activity)
 		line := scanner.Text()
-		switch {
-		case line == "":
+		if line == "" {
 			if data.Len() > 0 {
 				handler([]byte(strings.TrimSuffix(data.String(), "\n")))
 				data.Reset()
 			}
-		case strings.HasPrefix(line, "data:"):
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
 			data.WriteString(sseData(line))
 			data.WriteByte('\n')
-		case strings.HasPrefix(line, ":"):
-			// keepalive comment — ignore
+			continue
 		}
 	}
 	if data.Len() > 0 {

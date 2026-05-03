@@ -33,11 +33,6 @@ type Server struct {
 	engineStoppedUnexpected atomic.Bool
 }
 
-func newServer(engine *Engine, adminToken string) *Server {
-	cfg := &Config{AdminToken: adminToken, MaxTPS: 10000}
-	return newServerWithConfig(engine, cfg, nil, slog.Default())
-}
-
 func newServerWithConfig(engine *Engine, cfg *Config, store *Store, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
@@ -117,7 +112,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("TPS updated", "tps", req.TPS)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]int64{"tps": req.TPS})
+	if err := json.NewEncoder(w).Encode(map[string]int64{"tps": req.TPS}); err != nil {
+		s.logger.Warn("write config response", "error", err)
+	}
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +125,9 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	SetTPSTarget(0)
 	s.logger.Info("TPS stopped")
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]int64{"tps": 0})
+	if err := json.NewEncoder(w).Encode(map[string]int64{"tps": 0}); err != nil {
+		s.logger.Warn("write stop response", "error", err)
+	}
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -358,7 +357,9 @@ func firstNumber(m map[string]any, keys ...string) (float64, bool) {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Default().Warn("write JSON response", "error", err)
+	}
 }
 
 type configView Config
