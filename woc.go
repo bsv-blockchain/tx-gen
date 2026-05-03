@@ -113,10 +113,17 @@ func (c *wocClient) fetchUTXOsOnce(ctx context.Context, url string) ([]UTXO, boo
 		return nil, retryable, fmt.Errorf("WOC %d: %s", resp.StatusCode, body)
 	}
 
-	var raw []wocUTXO
-	if err := json.Unmarshal(body, &raw); err != nil {
+	var envelope struct {
+		Result []wocUTXO `json:"result"`
+		Error  string    `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil, false, fmt.Errorf("decode: %w", err)
 	}
+	if envelope.Error != "" {
+		return nil, false, fmt.Errorf("WOC: %s", envelope.Error)
+	}
+	raw := envelope.Result
 
 	utxos := make([]UTXO, len(raw))
 	for i, r := range raw {
