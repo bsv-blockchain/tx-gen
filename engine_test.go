@@ -71,7 +71,7 @@ func newTestEngine(broadcaster Broadcaster) *Engine {
 	e := &Engine{
 		queue:       q,
 		broadcaster: broadcaster,
-		lockScript:  buildLockScript(),
+		lockScript:  testLockScript(),
 		resume:      newNotify(),
 		numChains:   4,
 		fanoutSize:  2,
@@ -201,7 +201,7 @@ func TestPendingReplayAppliesDurableTransition(t *testing.T) {
 
 	q := newQueue()
 	q.PushMemory(oldTip)
-	e := newEngine(q, &arcadeClient{store: store}, buildLockScript())
+	e := newEngine(q, &arcadeClient{store: store}, testLockScript())
 
 	utxos, err := store.LoadAll()
 	if err != nil {
@@ -238,7 +238,7 @@ func TestNewEngineRestoresBootstrapStage(t *testing.T) {
 		t.Fatalf("SaveUTXO: %v", err)
 	}
 
-	e := newEngine(newQueue(), &arcadeClient{store: store}, buildLockScript())
+	e := newEngine(newQueue(), &arcadeClient{store: store}, testLockScript())
 	if got := e.Snapshot().BootstrapStage; got != "l2_done" {
 		t.Fatalf("bootstrap stage = %q, want l2_done", got)
 	}

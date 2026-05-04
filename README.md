@@ -10,13 +10,13 @@ High-throughput BSV transaction generator. Bootstraps 10,000 independent UTXO ch
 2. **Sustain** — runs 10,000 independent chains. Each chain fires one transaction per `10000/TPS` seconds. Every tx spends the configured sustain fee; the chain ends when its output reaches 0.
 3. **Resume** — if the queue already has UTXOs (from a previous run), skips bootstrap and resumes chains directly.
 
-By default transactions use an `OP_CODESEPARATOR` locking script and `OP_TRUE` unlocking script. If `PRIVATE_KEY` is set, the service switches to P2PKH: outputs lock to the key's mainnet address, inputs are signed with that key, and WhatOnChain lookup uses the P2PKH scripthash. Broadcast uses [Arcade v2](https://arcade-v2-us-1.bsvblockchain.tech) in Extended Format (EF). Chain tip and reorg events are logged via SSE.
+By default transactions use an instance-tagged push/drop locking script and `OP_TRUE` unlocking script. The lock script is `OP_PUSHBYTES_6 <INSTANCE_ID normalized to six UTF-8 bytes> OP_DROP`, so each instance has a distinct scripthash. If `PRIVATE_KEY` is set, the service switches to P2PKH: outputs lock to the key's mainnet address, inputs are signed with that key, and WhatOnChain lookup uses the P2PKH scripthash. Broadcast uses [Arcade v2](https://arcade-v2-us-1.bsvblockchain.tech) in Extended Format (EF). Chain tip and reorg events are logged via SSE.
 
 ## Prerequisites
 
 - Go 1.25+
-- A BSV mainnet UTXO locked to `OP_CODESEPARATOR` (0xab), or a P2PKH UTXO for the configured `PRIVATE_KEY`
-- Enough satoshis to sustain your intended chain length (`value / 7` transactions per chain for OP_CODESEPARATOR, `value / 20` for default P2PKH)
+- A BSV mainnet UTXO locked to the configured tagged-drop script, or a P2PKH UTXO for the configured `PRIVATE_KEY`
+- Enough satoshis to sustain your intended chain length (`value / 7` transactions per chain for tagged-drop, `value / 20` for default P2PKH)
 - Network access to WhatOnChain and the Arcade v2 node
 
 ## Setup
@@ -25,7 +25,7 @@ By default transactions use an `OP_CODESEPARATOR` locking script and `OP_TRUE` u
 git clone <repo>
 cd bsv-tx-gen
 cp .env.example .env
-# edit .env: set ADMIN_TOKEN
+# edit .env: set ADMIN_TOKEN and INSTANCE_ID
 go build -o bsv-tx-gen .
 ```
 
@@ -34,9 +34,10 @@ go build -o bsv-tx-gen .
 | Env var | Required | Default | Description |
 |---|---|---|---|
 | `ADMIN_TOKEN` | yes | — | Bearer token for the `/config` endpoint |
+| `INSTANCE_ID` | yes | — | Per-instance tag used in logs/alerts and, in default mode, normalized to exactly six UTF-8 bytes for the tagged-drop lock script. |
 | `PORT` | no | `8080` | HTTP listen port |
 | `PRIVATE_KEY` | no | empty | Enables P2PKH mode when set. Accepts WIF or 32-byte hex private keys. |
-| `SUSTAIN_FEE` | no | `7` or `20` | Satoshis per sustain hop. Defaults to `7` for OP_CODESEPARATOR and `20` for P2PKH. |
+| `SUSTAIN_FEE` | no | `7` or `20` | Satoshis per sustain hop. Defaults to `7` for tagged-drop and `20` for P2PKH. |
 | `ARCADE_CALLBACK_TOKEN` | no | empty | Enables Arcade transaction-event SSE. Broadcasts include this as `X-CallbackToken`; the service subscribes to `/events?callbackToken=...`. |
 
 ## Running
@@ -77,7 +78,7 @@ Valid range: `0`–`10000`. Setting `0` pauses all chains without losing state.
 
 | Metric | Formula | Example (1000 sat output) |
 |---|---|---|
-| Fee per hop | 7 sat OP_CODESEPARATOR, 20 sat P2PKH | 7 or 20 sat |
+| Fee per hop | 7 sat tagged-drop, 20 sat P2PKH | 7 or 20 sat |
 | Chain length | `value / fee` txs | ~142 txs at 7 sat |
 | Interval per chain at 16 TPS | `10000 / 16` ≈ 625 s | ~10 min |
 | Sustained TPS with 10k chains | `10000 / interval` | 16 TPS |
@@ -90,13 +91,14 @@ Multi-stage build to distroless image.
 docker build -t bsv-tx-gen .
 docker run -d -p 8080:8080 -v $(pwd)/data:/data \
   -e ADMIN_TOKEN=your-secret \
+  -e INSTANCE_ID=runner1 \
   -e STATE_PATH=/data/state.db \
   -e SLACK_WEBHOOK_URL=https://hooks.slack... \
   bsv-tx-gen
 ```
 
 Volume mount for `state.db` persistence across restarts. Terminate TLS at a reverse proxy such as Caddy or nginx; the service itself listens HTTP.
-Use a separate `STATE_PATH` when switching between OP_CODESEPARATOR and P2PKH modes, or between different P2PKH keys.
+Use a separate `STATE_PATH` when switching between tagged-drop and P2PKH modes, between different `INSTANCE_ID` values, or between different P2PKH keys.
 
 ## Full Environment Variables
 
@@ -113,7 +115,7 @@ See RUNBOOK.md for complete table. Key ops vars:
 | `MAX_TPS` | `10000` | Hard cap (degrade if requested > capacity) |
 | `SLACK_WEBHOOK_URL` | (empty) | Enables alerts + reorg case-study posts |
 | `ENVIRONMENT` | `production` | Tags all Slack / logs |
-| `INSTANCE_ID` | `local` | Unique per deployment for dedupe |
+| `INSTANCE_ID` | required | Unique per deployment; default lock script uses the first six UTF-8 bytes, padded with spaces if shorter |
 
 ## Endpoints
 

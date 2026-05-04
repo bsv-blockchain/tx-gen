@@ -179,8 +179,8 @@ func ensureStateMatchesTxMode(store *Store, mode *TxMode, hasUTXOs bool) error {
 	if storedHash != "" && storedHash != currentHash {
 		return fmt.Errorf("state lock script hash %s does not match configured %s; use a separate STATE_PATH or reconcile the existing state", storedHash, currentHash)
 	}
-	if storedHash == "" && hasUTXOs && mode.Name == txModeP2PKH {
-		return fmt.Errorf("state has persisted UTXOs without lock-script metadata; refusing P2PKH mode because existing outpoint scripts cannot be verified")
+	if storedHash == "" && hasUTXOs {
+		return fmt.Errorf("state has persisted UTXOs without lock-script metadata; refusing to continue because existing outpoint scripts cannot be verified")
 	}
 	if storedHash == "" {
 		if err := store.SetMeta(metaLockScriptHash, currentHash); err != nil {

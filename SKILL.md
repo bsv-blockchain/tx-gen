@@ -10,7 +10,7 @@ Generates BSV mainnet transactions at a configurable TPS. Bootstraps 10,000 UTXO
 ## Prerequisites
 
 - Go 1.25+ installed (`go version`)
-- A BSV mainnet UTXO locked to `OP_CODESEPARATOR` (0xab), or a P2PKH UTXO matching `PRIVATE_KEY`
+- A BSV mainnet UTXO locked to the configured tagged-drop script, or a P2PKH UTXO matching `PRIVATE_KEY`
 - `ADMIN_TOKEN` secret (any string; used for Bearer auth on `/config`)
 - Outbound HTTPS to `api.whatsonchain.com` and `arcade-v2-us-1.bsvblockchain.tech`
 
@@ -21,6 +21,7 @@ cd /path/to/bsv-tx-gen
 
 # 1. Set env vars
 export ADMIN_TOKEN=<secret>
+export INSTANCE_ID=<unique-instance-tag>
 export PORT=8080          # optional, default 8080
 # export PRIVATE_KEY=<wif-or-hex>  # optional; enables P2PKH mode
 
@@ -82,6 +83,7 @@ All 10,000 chain goroutines block immediately. No state is lost; resume by setti
 | Symptom | Check |
 |---|---|
 | `ADMIN_TOKEN env var required` | Export `ADMIN_TOKEN` before running |
+| `INSTANCE_ID is required` | Export a unique `INSTANCE_ID`; default tagged-drop mode uses it for the locking script |
 | `fetch UTXOs: ...` error | WhatOnChain connectivity; verify UTXO exists for the active mode's locking script |
 | `arcade 4xx: ...` | EF format or connectivity issue with Arcade v2 |
 | `bootstrap error: value N too small` | Funded UTXO too small; need `> 106` sats for L1 fanout |
@@ -92,8 +94,8 @@ All 10,000 chain goroutines block immediately. No state is lost; resume by setti
 
 - `numChains = 10_000`
 - `fanoutSize = 100`
-- OP_CODESEPARATOR sustain fee: `7` sats per hop
+- Tagged-drop sustain fee: `7` sats per hop
 - P2PKH sustain fee: `20` sats per hop by default
-- Default lock script: `0xab` (OP_CODESEPARATOR)
+- Default lock script: `OP_PUSHBYTES_6 <six-byte INSTANCE_ID> OP_DROP`
 - Default unlock script: `0x51` (OP_TRUE)
 - Arcade base URL: `https://arcade-v2-us-1.bsvblockchain.tech`

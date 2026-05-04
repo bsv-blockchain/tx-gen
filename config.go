@@ -70,6 +70,7 @@ func getEnvDuration(key string, def time.Duration) time.Duration {
 
 func LoadConfig() (*Config, error) {
 	privateKey := strings.TrimSpace(getEnv("PRIVATE_KEY", ""))
+	instanceID := strings.TrimSpace(getEnv("INSTANCE_ID", ""))
 	defaultSustainFee := uint64(sustainFee)
 	if privateKey != "" {
 		defaultSustainFee = p2pkhSustainFee
@@ -96,10 +97,13 @@ func LoadConfig() (*Config, error) {
 		SlackWebhookURL:      getEnv("SLACK_WEBHOOK_URL", ""),
 		SlackChannel:         getEnv("SLACK_CHANNEL", "#alerts"),
 		Environment:          getEnv("ENVIRONMENT", "production"),
-		InstanceID:           getEnv("INSTANCE_ID", "local"),
+		InstanceID:           instanceID,
 	}
 	if c.AdminToken == "" {
 		return nil, fmt.Errorf("ADMIN_TOKEN is required")
+	}
+	if c.InstanceID == "" {
+		return nil, fmt.Errorf("INSTANCE_ID is required")
 	}
 	return c, nil
 }

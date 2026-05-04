@@ -13,13 +13,14 @@ import (
 	"github.com/bsv-blockchain/go-sdk/transaction/template/p2pkh"
 )
 
-// sustainFee: ceil(62 bytes × 100 sat/KB) = 7 sats.
+// sustainFee: ceil(69 bytes × 100 sat/KB) = 7 sats.
 const sustainFee = 7
 const p2pkhSustainFee = 20
+const lockScriptTagBytes = 6
 
 const (
-	txModeCodeSeparator = "op_codeseparator"
-	txModeP2PKH         = "p2pkh"
+	txModeTaggedDrop = "tagged_drop"
+	txModeP2PKH      = "p2pkh"
 )
 
 type TxMode struct {
@@ -38,18 +39,25 @@ func NewTxModeFromConfig(cfg *Config) (*TxMode, error) {
 	if cfg != nil && cfg.SustainFee > 0 {
 		fee = cfg.SustainFee
 	}
-	return newCodeSeparatorTxMode(buildLockScript(), fee), nil
+	if cfg == nil {
+		return nil, fmt.Errorf("INSTANCE_ID is required for tagged-drop lock script")
+	}
+	lockScript, err := buildLockScript(cfg.InstanceID)
+	if err != nil {
+		return nil, err
+	}
+	return newTaggedDropTxMode(lockScript, fee), nil
 }
 
-func newCodeSeparatorTxMode(lockScript *script.Script, fee uint64) *TxMode {
+func newTaggedDropTxMode(lockScript *script.Script, fee uint64) *TxMode {
 	if lockScript == nil {
-		lockScript = buildLockScript()
+		lockScript = mustBuildLockScript("tx-gen")
 	}
 	if fee == 0 {
 		fee = sustainFee
 	}
 	return &TxMode{
-		Name:       txModeCodeSeparator,
+		Name:       txModeTaggedDrop,
 		LockScript: lockScript,
 		SustainFee: fee,
 	}
@@ -122,14 +130,14 @@ func varIntSize(n int) int {
 
 func normalizedTxMode(mode *TxMode) *TxMode {
 	if mode == nil {
-		return newCodeSeparatorTxMode(buildLockScript(), sustainFee)
+		return newTaggedDropTxMode(mustBuildLockScript("tx-gen"), sustainFee)
 	}
 	if mode.LockScript != nil && mode.SustainFee != 0 {
 		return mode
 	}
 	copyMode := *mode
 	if copyMode.LockScript == nil {
-		copyMode.LockScript = buildLockScript()
+		copyMode.LockScript = mustBuildLockScript("tx-gen")
 	}
 	if copyMode.SustainFee == 0 {
 		copyMode.SustainFee = sustainFee
@@ -140,9 +148,49 @@ func normalizedTxMode(mode *TxMode) *TxMode {
 	return &copyMode
 }
 
-func buildLockScript() *script.Script {
-	s := script.Script{script.OpCODESEPARATOR} // 0xab
-	return &s
+func buildLockScript(instanceID string) (*script.Script, error) {
+	tag, err := lockScriptTag(instanceID)
+	if err != nil {
+		return nil, err
+	}
+	s := script.Script{byte(lockScriptTagBytes)}
+	s = append(s, tag[:]...)
+	s = append(s, script.OpDROP)
+	return &s, nil
+}
+
+func mustBuildLockScript(instanceID string) *script.Script {
+	s, err := buildLockScript(instanceID)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+func lockScriptTag(instanceID string) ([lockScriptTagBytes]byte, error) {
+	var tag [lockScriptTagBytes]byte
+	for i := range tag {
+		tag[i] = ' '
+	}
+
+	value := strings.TrimSpace(instanceID)
+	if value == "" {
+		return tag, fmt.Errorf("INSTANCE_ID is required for tagged-drop lock script")
+	}
+
+	offset := 0
+	for _, r := range value {
+		encoded := []byte(string(r))
+		if offset+len(encoded) > len(tag) {
+			break
+		}
+		copy(tag[offset:], encoded)
+		offset += len(encoded)
+		if offset == len(tag) {
+			break
+		}
+	}
+	return tag, nil
 }
 
 func unlockScript() *script.Script {
@@ -175,7 +223,7 @@ func makeInput(utxo UTXO, mode *TxMode) (*sdktx.TransactionInput, error) {
 
 // buildFanoutTx creates a 1-input N-output EF transaction.
 func buildFanoutTx(utxo UTXO, n int, lockScript *script.Script) (txid string, efBytes []byte, outputs []UTXO, err error) {
-	return buildFanoutTxWithMode(utxo, n, newCodeSeparatorTxMode(lockScript, sustainFee))
+	return buildFanoutTxWithMode(utxo, n, newTaggedDropTxMode(lockScript, sustainFee))
 }
 
 func buildFanoutTxWithMode(utxo UTXO, n int, mode *TxMode) (txid string, efBytes []byte, outputs []UTXO, err error) {
@@ -230,7 +278,7 @@ func buildFanoutTxWithMode(utxo UTXO, n int, mode *TxMode) (txid string, efBytes
 // buildSustainTx creates the next EF tx in a chain.
 // newUTXO.Value == 0 signals the chain is finished.
 func buildSustainTx(utxo UTXO, lockScript *script.Script) (txid string, efBytes []byte, newUTXO UTXO, err error) {
-	return buildSustainTxWithMode(utxo, newCodeSeparatorTxMode(lockScript, sustainFee))
+	return buildSustainTxWithMode(utxo, newTaggedDropTxMode(lockScript, sustainFee))
 }
 
 func buildSustainTxWithMode(utxo UTXO, mode *TxMode) (txid string, efBytes []byte, newUTXO UTXO, err error) {

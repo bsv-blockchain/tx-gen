@@ -4,6 +4,7 @@
 
 Required:
 - ADMIN_TOKEN: bearer token for POST /config and GET /status
+- INSTANCE_ID: unique deployment id; default lock script uses this normalized to six UTF-8 bytes
 
 Optional with defaults:
 - PORT=8080
@@ -13,7 +14,7 @@ Optional with defaults:
 - ARCADE_BASE_URL=https://arcade-v2-us-1.bsvblockchain.tech
 - ARCADE_CALLBACK_TOKEN= (empty = disable Arcade transaction-event SSE)
 - WOC_BASE_URL=https://api.whatsonchain.com/v1/bsv/main
-- PRIVATE_KEY= (empty = OP_CODESEPARATOR mode; WIF or 32-byte hex = P2PKH mode)
+- PRIVATE_KEY= (empty = tagged-drop mode; WIF or 32-byte hex = P2PKH mode)
 - NUM_CHAINS=10000
 - FANOUT_SIZE=100
 - SUSTAIN_FEE=7 (defaults to 20 when PRIVATE_KEY is set)
@@ -26,18 +27,17 @@ Optional with defaults:
 - SLACK_WEBHOOK_URL= (empty = no Slack)
 - SLACK_CHANNEL=#alerts
 - ENVIRONMENT=production
-- INSTANCE_ID=local
 
 ## Start / Stop
 
 Bare metal:
 ```
-ADMIN_TOKEN=secret ./bsv-tx-gen
+ADMIN_TOKEN=secret INSTANCE_ID=runner1 ./bsv-tx-gen
 ```
 
 Docker:
 ```
-docker run -d --name txgen -p 8080:8080 -v $(pwd)/data:/data -e ADMIN_TOKEN=secret -e STATE_PATH=/data/state.db bsv-tx-gen
+docker run -d --name txgen -p 8080:8080 -v $(pwd)/data:/data -e ADMIN_TOKEN=secret -e INSTANCE_ID=runner1 -e STATE_PATH=/data/state.db bsv-tx-gen
 ```
 
 Stop with SIGINT/SIGTERM.
@@ -84,7 +84,8 @@ Periodic: rsync or volume snapshot of /data/state.db
 Restore: place state.db before start, engine resumes without full bootstrap if data present.
 
 State files are tied to the configured locking script. Use a separate STATE_PATH when
-switching between OP_CODESEPARATOR and P2PKH modes, or between different P2PKH keys.
+switching between tagged-drop and P2PKH modes, between different INSTANCE_ID values,
+or between different P2PKH keys.
 
 If bootstrapStage is l2_partial or unknown after a crash, do not delete state.db or force
 restart from WoC. Keep the DB, inspect /status lastError, and reconcile the configured

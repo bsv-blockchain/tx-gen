@@ -26,7 +26,7 @@ services:
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
       SLACK_CHANNEL: ${SLACK_CHANNEL:-#alerts}
       ENVIRONMENT: ${ENVIRONMENT:-production}
-      INSTANCE_ID: ${INSTANCE_ID:-local}
+      INSTANCE_ID: ${INSTANCE_ID:?INSTANCE_ID is required}
     restart: unless-stopped
 
   prometheus:
