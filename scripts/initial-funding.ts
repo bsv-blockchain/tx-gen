@@ -3,7 +3,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import type { Interface as ReadlineInterface } from 'node:readline/promises'
-import { stdin as input, stdout as output, exit } from 'node:process'
+import { argv, stdin as input, stdout as output, exit } from 'node:process'
 import { WalletClient, Script, Transaction, Utils } from '@bsv/sdk'
 
 const DEFAULT_ARCADE_BASE_URL = 'https://arcade-v2-us-1.bsvblockchain.tech'
@@ -42,7 +42,7 @@ async function main() {
   const tagHex = Utils.toHex(Array.from(tagBytes))
   const tagDisplay = Buffer.from(tagBytes).toString('utf8')
   const arcadeBaseURL = trimTrailingSlash(process.env.ARCADE_BASE_URL || DEFAULT_ARCADE_BASE_URL)
-  const txgenBaseURL = trimTrailingSlash(process.env.TXGEN_BASE_URL || `http://localhost:${process.env.PORT || '8080'}`)
+  const txgenBaseURL = resolveTxGenBaseURL()
   const walletOriginator = process.env.WALLET_ORIGINATOR || DEFAULT_WALLET_ORIGINATOR
   const fanoutSizeOverride = envOptionalInt('FANOUT_SIZE')
   const utxoIdleSeconds = envInt('UTXO_IDLE_SECONDS', DEFAULT_UTXO_IDLE_SECONDS)
@@ -520,6 +520,27 @@ async function postEF(baseURL: string, ef: number[]) {
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, '')
+}
+
+function resolveTxGenBaseURL(): string {
+  const arg = argv.slice(2).find((value) => value !== '--')
+  const raw = arg || process.env.TXGEN_BASE_URL || `localhost:${process.env.PORT || '8080'}`
+  return normalizeHTTPBaseURL(raw)
+}
+
+function normalizeHTTPBaseURL(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    throw new Error('host URL must not be empty')
+  }
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`
+  const url = new URL(withScheme)
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`host URL must use http or https, got ${url.protocol}`)
+  }
+  url.hash = ''
+  url.search = ''
+  return trimTrailingSlash(url.toString())
 }
 
 main().catch((err: unknown) => {

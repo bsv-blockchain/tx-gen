@@ -15,8 +15,9 @@ By default transactions use an instance-tagged push/drop locking script and `OP_
 ## Prerequisites
 
 - Go 1.25+
-- A BSV mainnet UTXO locked to the configured tagged-drop script, or a P2PKH UTXO for the configured `PRIVATE_KEY`
-- Enough satoshis to sustain your intended chain length (`value / 7` transactions per chain for tagged-drop, `value / 20` for default P2PKH)
+- Node 22.6+ for the funding script
+- BSV Desktop running locally with enough wallet funds for a fresh tagged-drop setup, or an existing BSV mainnet UTXO locked to the configured script for resume
+- Enough satoshis to sustain your intended chain length. The funding script estimates this for tagged-drop mode; P2PKH mode uses `value / 20` transactions per chain by default.
 - Network access to WhatOnChain and the Arcade v2 node
 
 ## Setup
@@ -40,25 +41,51 @@ go build -o bsv-tx-gen .
 | `SUSTAIN_FEE` | no | `7` or `20` | Satoshis per sustain hop. Defaults to `7` for tagged-drop and `20` for P2PKH. |
 | `ARCADE_CALLBACK_TOKEN` | no | empty | Enables Arcade transaction-event SSE. Broadcasts include this as `X-CallbackToken`; the service subscribes to `/events?callbackToken=...`. |
 
-## Running
+## Running The System
+
+Use two terminals for a new tagged-drop run.
+
+Terminal 1 starts the server:
 
 ```sh
 source .env
 ./bsv-tx-gen
 ```
 
-On startup the service logs its scripthash, fetches UTXOs, and begins bootstrap (or resumes). TPS starts at 0 — no transactions are sent until you set a rate.
+On startup the service logs its scripthash and checks WhatOnChain for matching UTXOs. For a fresh instance, no UTXO exists yet, so the server stays up and waits for the initial funding output. The server must be running before the funding script can apply its computed `POST /config` values.
 
-## Initial Funding
-
-Create the first tagged-drop UTXO from a local BSV Desktop wallet, then post it to Arcade as EF:
+Terminal 2 runs the funding setup:
 
 ```sh
 npm install
-INSTANCE_ID=deggen npm run fund:initial
+source .env
+npm run fund
 ```
 
-Requires Node 22.6+. The script also loads `.env` from the repo root. It prompts for target TPS and duration, derives `NUM_CHAINS` from `TPS * UTXO_IDLE_SECONDS` (default `600`, or 10 minutes), derives `FANOUT_SIZE` from roughly `sqrt(NUM_CHAINS)`, estimates the initial output value using `SUSTAIN_FEE`, and can apply `tps`, `numChains`, `fanoutSize`, and `sustainFee` to a running tx-gen service via authenticated `POST /config`. It validates the planned bootstrap fanout transactions against a 100 MB transaction-size cap before requesting wallet funding. It then asks BSV Desktop to create a no-send wallet action, converts the returned Atomic BEEF with `Transaction.fromBEEF(tx).toEF()`, and posts it to `${ARCADE_BASE_URL}/tx`.
+For a deployed tx-gen instance, pass the service URL as the optional first argument:
+
+```sh
+ADMIN_TOKEN=secret INSTANCE_ID=deggen npm run fund https://tx-gen.example.com
+```
+
+The URL is the tx-gen server URL, not the Arcade URL. If no URL is provided, the script uses `TXGEN_BASE_URL` or defaults to `http://localhost:8080`.
+
+## Initial Funding
+
+The funding script creates the first tagged-drop UTXO from a local BSV Desktop wallet, posts the server configuration to tx-gen, and broadcasts the wallet transaction to Arcade as EF.
+
+Flow:
+
+1. Prompts for target TPS and run duration.
+2. Derives `NUM_CHAINS` from `TPS * UTXO_IDLE_SECONDS`; default idle target is 600 seconds.
+3. Derives `FANOUT_SIZE` from roughly `sqrt(NUM_CHAINS)` unless `FANOUT_SIZE` is explicitly set.
+4. Validates planned bootstrap fanout transactions against `MAX_BOOTSTRAP_TX_BYTES`, default `100000000`.
+5. Applies `tps`, `numChains`, `fanoutSize`, and `sustainFee` to the running tx-gen server with authenticated `POST /config`.
+6. Requests BSV Desktop wallet funding for the initial tagged-drop output.
+7. Converts the returned Atomic BEEF with `Transaction.fromBEEF(tx).toEF()` and posts it to `${ARCADE_BASE_URL}/tx`.
+8. The running tx-gen server detects the funded output through WhatOnChain, bootstraps the configured chains, and begins sustaining the requested TPS.
+
+Requires Node 22.6+, a local BSV Desktop wallet, `INSTANCE_ID`, and `ADMIN_TOKEN` when applying config to a running server. If `ADMIN_TOKEN` is missing, the script prints the config payload but cannot apply it. If the tx-gen server is not reachable, the config POST fails before wallet funding. Set `SKIP_TXGEN_CONFIG=1` only when you intend to apply matching server config yourself.
 
 Optional env vars: `TXGEN_BASE_URL`, `ADMIN_TOKEN`, `SKIP_TXGEN_CONFIG`, `ARCADE_BASE_URL`, `ARCADE_CALLBACK_TOKEN`, `WALLET_ORIGINATOR`, `FUNDING_BASKET`, `FANOUT_SIZE` (override), `UTXO_IDLE_SECONDS`, `SUSTAIN_FEE`, `MAX_BOOTSTRAP_TX_BYTES`.
 
@@ -76,7 +103,7 @@ docker compose up -d --build
 
 Grafana is provisioned with the `tx-gen Overview` dashboard under the `Local` folder. Override ports or Grafana credentials with `GRAFANA_PORT`, `PROMETHEUS_PORT`, `GRAFANA_ADMIN_USER`, and `GRAFANA_ADMIN_PASSWORD`.
 
-## Setting TPS
+## Runtime Config
 
 ```sh
 curl -X POST http://localhost:8080/config \
@@ -85,7 +112,16 @@ curl -X POST http://localhost:8080/config \
   -d '{"tps": 16, "numChains": 9600, "fanoutSize": 100, "sustainFee": 7}'
 ```
 
-All fields are optional, but at least one must be supplied. `tps` can be changed at any time; setting it to `0` pauses all chains without losing state. Bootstrap fields (`numChains`, `fanoutSize`, `sustainFee`) are accepted only before the initial funding UTXO is detected.
+All fields are optional, but at least one must be supplied. `tps` can be changed at any time; setting it to `0` pauses all chains without losing state. Bootstrap fields (`numChains`, `fanoutSize`, `sustainFee`) are accepted only before the initial funding UTXO is detected. The funding script normally sends these bootstrap fields for you.
+
+After bootstrap, use TPS-only updates:
+
+```sh
+curl -X POST http://localhost:8080/config \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"tps": 16}'
+```
 
 ## Chain math
 

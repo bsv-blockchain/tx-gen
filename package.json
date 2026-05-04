@@ -6,7 +6,8 @@
     "node": ">=22.6"
   },
   "scripts": {
-    "fund:initial": "node --experimental-strip-types scripts/initial-funding.ts",
+    "fund": "node --experimental-strip-types scripts/initial-funding.ts",
+    "fund:initial": "npm run fund --",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
