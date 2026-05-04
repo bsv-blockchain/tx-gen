@@ -603,7 +603,11 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 
 func (e *Engine) startChains(ctx context.Context) {
 	e.setState(func(s *EngineState) {
-		s.Lifecycle = LifecycleRunning
+		if e.tps.Load() > 0 {
+			s.Lifecycle = LifecycleRunning
+		} else {
+			s.Lifecycle = LifecyclePaused
+		}
 		s.ChainsTarget = e.numChains
 	})
 
