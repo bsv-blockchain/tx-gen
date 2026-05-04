@@ -4,3 +4,4 @@ state.db
 *.db
 ARCHITECTURE.html
 .cache/
+node_modules/

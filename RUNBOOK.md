@@ -15,8 +15,8 @@ Optional with defaults:
 - ARCADE_CALLBACK_TOKEN= (empty = disable Arcade transaction-event SSE)
 - WOC_BASE_URL=https://api.whatsonchain.com/v1/bsv/main
 - PRIVATE_KEY= (empty = tagged-drop mode; WIF or 32-byte hex = P2PKH mode)
-- NUM_CHAINS=10000
-- FANOUT_SIZE=100
+- NUM_CHAINS=10000 (set from the initial funding script for new runs)
+- FANOUT_SIZE=100 (max outputs per bootstrap fanout transaction)
 - SUSTAIN_FEE=7 (defaults to 20 when PRIVATE_KEY is set)
 - MAX_TPS=10000
 - BROADCAST_CONCURRENCY=64

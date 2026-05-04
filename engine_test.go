@@ -125,6 +125,25 @@ func TestBootstrapFull(t *testing.T) {
 	}
 }
 
+// TestBootstrapFullNonSquare verifies arbitrary NUM_CHAINS values do not need FANOUT_SIZE^2.
+func TestBootstrapFullNonSquare(t *testing.T) {
+	fb := &fakeBroadcaster{}
+	e := newTestEngine(fb)
+	e.numChains = 5
+	e.fanoutSize = 3
+	e.queue.Push(UTXO{TxHash: testTxID, TxPos: 0, Value: 10_000})
+
+	if err := e.bootstrapFull(context.Background()); err != nil {
+		t.Fatalf("bootstrapFull: %v", err)
+	}
+	if got := fb.count.Load(); got != 3 {
+		t.Errorf("broadcast count = %d, want 3 (1 L1 + 2 L2)", got)
+	}
+	if got := e.queue.Len(); got != 5 {
+		t.Errorf("queue len = %d, want 5", got)
+	}
+}
+
 // TestBootstrapL2Resume verifies: 2 existing L1 UTXOs → 2 broadcasts → 4 leaf UTXOs.
 func TestBootstrapL2Resume(t *testing.T) {
 	fb := &fakeBroadcaster{}
@@ -140,6 +159,25 @@ func TestBootstrapL2Resume(t *testing.T) {
 	}
 	if got := e.queue.Len(); got != 4 {
 		t.Errorf("queue len = %d, want 4", got)
+	}
+}
+
+func TestBootstrapL2NonSquare(t *testing.T) {
+	fb := &fakeBroadcaster{}
+	e := newTestEngine(fb)
+	e.numChains = 5
+	e.fanoutSize = 3
+	e.queue.Push(UTXO{TxHash: testTxID, TxPos: 0, Value: 5_000})
+	e.queue.Push(UTXO{TxHash: testTxID, TxPos: 1, Value: 5_000})
+
+	if err := e.bootstrapL2(context.Background()); err != nil {
+		t.Fatalf("bootstrapL2: %v", err)
+	}
+	if got := fb.count.Load(); got != 2 {
+		t.Errorf("broadcast count = %d, want 2", got)
+	}
+	if got := e.queue.Len(); got != 5 {
+		t.Errorf("queue len = %d, want 5", got)
 	}
 }
 

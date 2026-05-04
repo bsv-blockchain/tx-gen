@@ -1,0 +1,19 @@
+{
+  "name": "bsv-tx-gen-tools",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "fund:initial": "node --experimental-strip-types scripts/initial-funding.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@bsv/sdk": "^2.0.14"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "typescript": "^5.8.2"
+  }
+}

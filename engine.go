@@ -347,7 +347,7 @@ func (e *Engine) run(ctx context.Context) {
 		if qlen >= e.numChains {
 			log.Printf("resuming with %d existing UTXOs (l2_partial → l2_done)", qlen)
 			e.setBootstrapStage("l2_done")
-		} else if qlen == e.fanoutSize {
+		} else if qlen == e.l1FanoutSize() {
 			log.Printf("bootstrap: L2 fanout from l2_partial (%d → %d)", qlen, e.numChains)
 			bootstrapErr = e.bootstrapL2(ctx)
 		} else if qlen > 0 {
@@ -359,10 +359,10 @@ func (e *Engine) run(ctx context.Context) {
 	case stage == "unknown":
 		bootstrapErr = fmt.Errorf("bootstrap stage %q requires manual recovery", stage)
 	case qlen == 1:
-		log.Printf("bootstrap: L1 + L2 fanout (1 → %d → %d)", e.fanoutSize, e.numChains)
+		log.Printf("bootstrap: L1 + L2 fanout (1 → %d → %d)", e.l1FanoutSize(), e.numChains)
 		bootstrapErr = e.bootstrapFull(ctx)
-	case qlen == e.fanoutSize:
-		log.Printf("bootstrap: L2 fanout only (%d → %d)", e.fanoutSize, e.numChains)
+	case qlen == e.l1FanoutSize():
+		log.Printf("bootstrap: L2 fanout only (%d → %d)", e.l1FanoutSize(), e.numChains)
 		bootstrapErr = e.bootstrapL2(ctx)
 	case qlen > 0:
 		log.Printf("resuming with %d existing UTXOs", qlen)
@@ -399,6 +399,37 @@ func (e *Engine) trackTPS(ctx context.Context) {
 	}
 }
 
+func ceilDivInt(n, d int) int {
+	if d <= 0 {
+		return 0
+	}
+	return (n + d - 1) / d
+}
+
+func (e *Engine) l1FanoutSize() int {
+	fanoutSize := e.fanoutSize
+	if fanoutSize <= 0 {
+		fanoutSize = 100
+	}
+	numChains := e.numChains
+	if numChains <= 0 {
+		numChains = 10_000
+	}
+	return ceilDivInt(numChains, fanoutSize)
+}
+
+func l2FanoutSizeForParent(numChains, parentCount, parentIndex int) int {
+	if numChains <= 0 || parentCount <= 0 || parentIndex < 0 || parentIndex >= parentCount {
+		return 0
+	}
+	base := numChains / parentCount
+	remainder := numChains % parentCount
+	if parentIndex < remainder {
+		return base + 1
+	}
+	return base
+}
+
 // bootstrapFull: L0 UTXO → L1 fanout → L2 fanout.
 func (e *Engine) bootstrapFull(ctx context.Context) error {
 	e.setBootstrapStage("none")
@@ -408,7 +439,7 @@ func (e *Engine) bootstrapFull(ctx context.Context) error {
 		return fmt.Errorf("queue empty")
 	}
 
-	txid, efBytes, l1Outs, buildErr := buildFanoutTxWithMode(utxo, e.fanoutSize, e.mode())
+	txid, efBytes, l1Outs, buildErr := buildFanoutTxWithMode(utxo, e.l1FanoutSize(), e.mode())
 	if buildErr != nil {
 		e.queue.PushMemory(utxo)
 		return fmt.Errorf("build L1: %w", buildErr)
@@ -485,6 +516,12 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 	if len(parents) == 0 {
 		return fmt.Errorf("no L1 outputs to fan out")
 	}
+	if len(parents) > e.numChains {
+		for _, parent := range parents {
+			e.queue.PushMemory(parent)
+		}
+		return fmt.Errorf("too many L1 outputs: got %d, want at most %d", len(parents), e.numChains)
+	}
 
 	type l2result struct {
 		outputs []UTXO
@@ -499,7 +536,8 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 		statuses[i].Store(int32(psPending))
 		SafeGo(&wg, fmt.Sprintf("l2_%d", i), func() {
 			statuses[i].Store(int32(psBuilding))
-			txid, ef, outs, err := buildFanoutTxWithMode(parent, e.fanoutSize, e.mode())
+			fanoutSize := l2FanoutSizeForParent(e.numChains, len(parents), i)
+			txid, ef, outs, err := buildFanoutTxWithMode(parent, fanoutSize, e.mode())
 			if err != nil {
 				statuses[i].Store(int32(psFailed))
 				results[i] = l2result{err: fmt.Errorf("build %s: %w", parent.TxHash, err)}
