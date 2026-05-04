@@ -9,7 +9,7 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN:-admin1234}
       PORT: "8080"
       STATE_PATH: /data/state.db
-      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
       LOG_FORMAT: ${LOG_FORMAT:-json}
       ARCADE_BASE_URL: ${ARCADE_BASE_URL:-https://arcade-v2-us-1.bsvblockchain.tech}
       WOC_BASE_URL: ${WOC_BASE_URL:-https://api.whatsonchain.com/v1/bsv/main}

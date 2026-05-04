@@ -10,7 +10,7 @@ Generates BSV mainnet transactions at a configurable TPS. Bootstraps 10,000 UTXO
 ## Prerequisites
 
 - Go 1.25+ installed (`go version`)
-- A BSV mainnet UTXO locked to `OP_NOP4` (0xB9), or a P2PKH UTXO matching `PRIVATE_KEY`
+- A BSV mainnet UTXO locked to `OP_CODESEPARATOR` (0xab), or a P2PKH UTXO matching `PRIVATE_KEY`
 - `ADMIN_TOKEN` secret (any string; used for Bearer auth on `/config`)
 - Outbound HTTPS to `api.whatsonchain.com` and `arcade-v2-us-1.bsvblockchain.tech`
 
@@ -92,8 +92,8 @@ All 10,000 chain goroutines block immediately. No state is lost; resume by setti
 
 - `numChains = 10_000`
 - `fanoutSize = 100`
-- OP_NOP4 sustain fee: `7` sats per hop
+- OP_CODESEPARATOR sustain fee: `7` sats per hop
 - P2PKH sustain fee: `20` sats per hop by default
-- Default lock script: `0xB9` (OP_NOP10 in go-sdk, called OP_NOP4 in this codebase)
+- Default lock script: `0xab` (OP_CODESEPARATOR)
 - Default unlock script: `0x51` (OP_TRUE)
 - Arcade base URL: `https://arcade-v2-us-1.bsvblockchain.tech`

@@ -18,8 +18,8 @@ const sustainFee = 7
 const p2pkhSustainFee = 20
 
 const (
-	txModeOPNOP4 = "op_nop4"
-	txModeP2PKH  = "p2pkh"
+	txModeCodeSeparator = "op_codeseparator"
+	txModeP2PKH         = "p2pkh"
 )
 
 type TxMode struct {
@@ -38,10 +38,10 @@ func NewTxModeFromConfig(cfg *Config) (*TxMode, error) {
 	if cfg != nil && cfg.SustainFee > 0 {
 		fee = cfg.SustainFee
 	}
-	return newOPNOP4TxMode(buildLockScript(), fee), nil
+	return newCodeSeparatorTxMode(buildLockScript(), fee), nil
 }
 
-func newOPNOP4TxMode(lockScript *script.Script, fee uint64) *TxMode {
+func newCodeSeparatorTxMode(lockScript *script.Script, fee uint64) *TxMode {
 	if lockScript == nil {
 		lockScript = buildLockScript()
 	}
@@ -49,7 +49,7 @@ func newOPNOP4TxMode(lockScript *script.Script, fee uint64) *TxMode {
 		fee = sustainFee
 	}
 	return &TxMode{
-		Name:       txModeOPNOP4,
+		Name:       txModeCodeSeparator,
 		LockScript: lockScript,
 		SustainFee: fee,
 	}
@@ -122,7 +122,7 @@ func varIntSize(n int) int {
 
 func normalizedTxMode(mode *TxMode) *TxMode {
 	if mode == nil {
-		return newOPNOP4TxMode(buildLockScript(), sustainFee)
+		return newCodeSeparatorTxMode(buildLockScript(), sustainFee)
 	}
 	if mode.LockScript != nil && mode.SustainFee != 0 {
 		return mode
@@ -141,7 +141,7 @@ func normalizedTxMode(mode *TxMode) *TxMode {
 }
 
 func buildLockScript() *script.Script {
-	s := script.Script{script.OpNOP4} // 0xB4
+	s := script.Script{script.OpCODESEPARATOR} // 0xab
 	return &s
 }
 
@@ -175,7 +175,7 @@ func makeInput(utxo UTXO, mode *TxMode) (*sdktx.TransactionInput, error) {
 
 // buildFanoutTx creates a 1-input N-output EF transaction.
 func buildFanoutTx(utxo UTXO, n int, lockScript *script.Script) (txid string, efBytes []byte, outputs []UTXO, err error) {
-	return buildFanoutTxWithMode(utxo, n, newOPNOP4TxMode(lockScript, sustainFee))
+	return buildFanoutTxWithMode(utxo, n, newCodeSeparatorTxMode(lockScript, sustainFee))
 }
 
 func buildFanoutTxWithMode(utxo UTXO, n int, mode *TxMode) (txid string, efBytes []byte, outputs []UTXO, err error) {
@@ -230,7 +230,7 @@ func buildFanoutTxWithMode(utxo UTXO, n int, mode *TxMode) (txid string, efBytes
 // buildSustainTx creates the next EF tx in a chain.
 // newUTXO.Value == 0 signals the chain is finished.
 func buildSustainTx(utxo UTXO, lockScript *script.Script) (txid string, efBytes []byte, newUTXO UTXO, err error) {
-	return buildSustainTxWithMode(utxo, newOPNOP4TxMode(lockScript, sustainFee))
+	return buildSustainTxWithMode(utxo, newCodeSeparatorTxMode(lockScript, sustainFee))
 }
 
 func buildSustainTxWithMode(utxo UTXO, mode *TxMode) (txid string, efBytes []byte, newUTXO UTXO, err error) {

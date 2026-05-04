@@ -12,7 +12,7 @@ Optional with defaults:
 - LOG_FORMAT=json
 - ARCADE_BASE_URL=https://arcade-v2-us-1.bsvblockchain.tech
 - WOC_BASE_URL=https://api.whatsonchain.com/v1/bsv/main
-- PRIVATE_KEY= (empty = OP_NOP4 mode; WIF or 32-byte hex = P2PKH mode)
+- PRIVATE_KEY= (empty = OP_CODESEPARATOR mode; WIF or 32-byte hex = P2PKH mode)
 - NUM_CHAINS=10000
 - FANOUT_SIZE=100
 - SUSTAIN_FEE=7 (defaults to 20 when PRIVATE_KEY is set)
@@ -71,7 +71,7 @@ Periodic: rsync or volume snapshot of /data/state.db
 Restore: place state.db before start, engine resumes without full bootstrap if data present.
 
 State files are tied to the configured locking script. Use a separate STATE_PATH when
-switching between OP_NOP4 and P2PKH modes, or between different P2PKH keys.
+switching between OP_CODESEPARATOR and P2PKH modes, or between different P2PKH keys.
 
 If bootstrapStage is l2_partial or unknown after a crash, do not delete state.db or force
 restart from WoC. Keep the DB, inspect /status lastError, and reconcile the configured

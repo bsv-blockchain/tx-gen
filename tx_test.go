@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bsv-blockchain/go-sdk/script"
 	sdktx "github.com/bsv-blockchain/go-sdk/transaction"
 )
 
@@ -117,22 +118,29 @@ func TestBuildSustainTxInvalidTxID(t *testing.T) {
 	}
 }
 
-func TestTxModeDefaultsToOPNOP4(t *testing.T) {
+func TestTxModeDefaultsToCodeSeparator(t *testing.T) {
 	mode, err := NewTxModeFromConfig(&Config{})
 	if err != nil {
 		t.Fatalf("NewTxModeFromConfig: %v", err)
 	}
-	if mode.Name != txModeOPNOP4 {
-		t.Fatalf("mode.Name = %q, want %q", mode.Name, txModeOPNOP4)
+	if mode.Name != txModeCodeSeparator {
+		t.Fatalf("mode.Name = %q, want %q", mode.Name, txModeCodeSeparator)
 	}
 	if mode.SustainFee != sustainFee {
 		t.Fatalf("mode.SustainFee = %d, want %d", mode.SustainFee, sustainFee)
 	}
 	if mode.Unlocker != nil {
-		t.Fatal("OP_NOP4 mode should not have an unlocking template")
+		t.Fatal("OP_CODESEPARATOR mode should not have an unlocking template")
 	}
 	if got, want := scriptHash(mode.LockScript), scriptHash(buildLockScript()); got != want {
 		t.Fatalf("script hash = %s, want %s", got, want)
+	}
+}
+
+func TestDefaultLockScriptIsSingleCodeSeparator(t *testing.T) {
+	lockScript := buildLockScript()
+	if got := []byte(*lockScript); len(got) != 1 || got[0] != script.OpCODESEPARATOR {
+		t.Fatalf("lock script = %x, want single OP_CODESEPARATOR %x", got, script.OpCODESEPARATOR)
 	}
 }
 
@@ -157,7 +165,7 @@ func TestTxModeUsesP2PKHWhenPrivateKeyIsSet(t *testing.T) {
 		t.Fatalf("lock script %x is not P2PKH", []byte(*mode.LockScript))
 	}
 	if got, want := scriptHash(mode.LockScript), scriptHash(buildLockScript()); got == want {
-		t.Fatalf("P2PKH script hash should differ from OP_NOP4 hash %s", want)
+		t.Fatalf("P2PKH script hash should differ from default script hash %s", want)
 	}
 }
 

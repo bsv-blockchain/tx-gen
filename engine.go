@@ -133,7 +133,7 @@ type Engine struct {
 }
 
 func newEngine(q *Queue, arcade *arcadeClient, lockScript *script.Script) *Engine {
-	return newEngineWithMode(q, arcade, newOPNOP4TxMode(lockScript, sustainFee))
+	return newEngineWithMode(q, arcade, newCodeSeparatorTxMode(lockScript, sustainFee))
 }
 
 func newEngineWithMode(q *Queue, arcade *arcadeClient, mode *TxMode) *Engine {
@@ -189,9 +189,9 @@ func (e *Engine) mode() *TxMode {
 		return normalizedTxMode(e.txMode)
 	}
 	if e != nil {
-		return newOPNOP4TxMode(e.lockScript, sustainFee)
+		return newCodeSeparatorTxMode(e.lockScript, sustainFee)
 	}
-	return newOPNOP4TxMode(buildLockScript(), sustainFee)
+	return newCodeSeparatorTxMode(buildLockScript(), sustainFee)
 }
 
 func (e *Engine) configure(numChains, fanoutSize int) {
