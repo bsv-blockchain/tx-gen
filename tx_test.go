@@ -215,6 +215,7 @@ func TestBuildSustainTxP2PKHSignsInput(t *testing.T) {
 func TestLoadConfigDefaultsAndRedactsPrivateKey(t *testing.T) {
 	t.Setenv("ADMIN_TOKEN", "secret")
 	t.Setenv("PRIVATE_KEY", testP2PKHWIF)
+	t.Setenv("ARCADE_CALLBACK_TOKEN", "callback-secret")
 	t.Setenv("SUSTAIN_FEE", "")
 
 	cfg, err := LoadConfig()
@@ -231,12 +232,18 @@ func TestLoadConfigDefaultsAndRedactsPrivateKey(t *testing.T) {
 	if strings.Contains(string(b), testP2PKHWIF) {
 		t.Fatalf("Config MarshalJSON leaked private key: %s", b)
 	}
+	if strings.Contains(string(b), "callback-secret") {
+		t.Fatalf("Config MarshalJSON leaked callback token: %s", b)
+	}
 	view, err := json.Marshal(redactedConfig(cfg))
 	if err != nil {
 		t.Fatalf("redactedConfig marshal: %v", err)
 	}
 	if strings.Contains(string(view), testP2PKHWIF) {
 		t.Fatalf("redactedConfig leaked private key: %s", view)
+	}
+	if strings.Contains(string(view), "callback-secret") {
+		t.Fatalf("redactedConfig leaked callback token: %s", view)
 	}
 }
 

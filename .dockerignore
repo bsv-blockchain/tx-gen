@@ -5,3 +5,4 @@ bsv-tx-gen
 .git
 .github
 *.html
+.cache

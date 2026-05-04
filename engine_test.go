@@ -3,11 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,6 +23,31 @@ type fakeBroadcaster struct {
 
 func (f *fakeBroadcaster) Broadcast(_ context.Context, _ []byte) error {
 	f.count.Add(1)
+	return f.err
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type fakeKnownTxBroadcaster struct {
+	count atomic.Int64
+	txid  string
+	kind  string
+	err   error
+}
+
+func (f *fakeKnownTxBroadcaster) Broadcast(_ context.Context, _ []byte) error {
+	f.count.Add(1)
+	return f.err
+}
+
+func (f *fakeKnownTxBroadcaster) BroadcastKnownTx(_ context.Context, kind, txid string, _ []byte) error {
+	f.count.Add(1)
+	f.kind = kind
+	f.txid = txid
 	return f.err
 }
 
@@ -219,23 +244,97 @@ func TestNewEngineRestoresBootstrapStage(t *testing.T) {
 	}
 }
 
-func TestBootstrapL2ReconcileRequiresExpectedOutpoints(t *testing.T) {
+func TestEngineBroadcastPassesTxIDWhenSupported(t *testing.T) {
+	fb := &fakeKnownTxBroadcaster{}
+	e := newTestEngine(fb)
+
+	if err := e.broadcastTx(context.Background(), testTxID, []byte{1, 2, 3}); err != nil {
+		t.Fatalf("broadcastTx: %v", err)
+	}
+	if fb.txid != testTxID {
+		t.Fatalf("txid = %q, want %q", fb.txid, testTxID)
+	}
+	if fb.kind != "tx" {
+		t.Fatalf("kind = %q, want tx", fb.kind)
+	}
+}
+
+func TestBootstrapL2DoesNotRequireWoCReconcile(t *testing.T) {
 	e := newTestEngine(&fakeBroadcaster{})
 	e.queue.Push(UTXO{TxHash: testTxID, TxPos: 0, Value: 5_000})
 	e.queue.Push(UTXO{TxHash: testTxID, TxPos: 1, Value: 5_000})
 	e.SetUTXOSource(fakeUTXOSource{utxos: []UTXO{
-		{TxHash: strings.Repeat("c", 64), TxPos: 0, Value: 1},
-		{TxHash: strings.Repeat("c", 64), TxPos: 1, Value: 1},
-		{TxHash: strings.Repeat("d", 64), TxPos: 0, Value: 1},
-		{TxHash: strings.Repeat("d", 64), TxPos: 1, Value: 1},
+		{TxHash: otherTestTxID, TxPos: 0, Value: 1},
 	}})
 
-	err := e.bootstrapL2(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "WoC missing") {
-		t.Fatalf("bootstrapL2 error = %v, want WoC missing expected outpoints", err)
+	if err := e.bootstrapL2(context.Background()); err != nil {
+		t.Fatalf("bootstrapL2: %v", err)
 	}
-	if got := e.Snapshot().BootstrapStage; got != "l2_partial" {
-		t.Fatalf("bootstrap stage = %q, want l2_partial", got)
+	if got := e.Snapshot().BootstrapStage; got != "l2_done" {
+		t.Fatalf("bootstrap stage = %q, want l2_done", got)
+	}
+	if got := e.queue.Len(); got != e.numChains {
+		t.Fatalf("queue len = %d, want %d", got, e.numChains)
+	}
+}
+
+func TestArcadeTxStatusEndpoint(t *testing.T) {
+	arcadeHTTP := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet || r.URL.Path != "/tx/"+testTxID {
+			t.Fatalf("request = %s %s, want GET /tx/%s", r.Method, r.URL.Path, testTxID)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewBufferString(`{"txid":"` + testTxID + `","txStatus":"SEEN_ON_NETWORK"}`)),
+		}, nil
+	})}
+
+	e := newTestEngine(&fakeBroadcaster{})
+	e.arcade = &arcadeClient{
+		base:        "http://arcade.test",
+		http:        arcadeHTTP,
+		concurrency: make(chan struct{}, 1),
+		retryMax:    1,
+		logger:      slog.Default(),
+	}
+	s := newServerWithConfig(e, &Config{AdminToken: "secret"}, nil, slog.Default())
+
+	req := httptest.NewRequest(http.MethodGet, "/arcade/tx/"+testTxID, nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+	s.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if got := rr.Body.String(); got != `{"txid":"`+testTxID+`","txStatus":"SEEN_ON_NETWORK"}` {
+		t.Fatalf("body = %s", got)
+	}
+}
+
+func TestArcadeBroadcastSetsCallbackToken(t *testing.T) {
+	arcadeHTTP := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got, want := r.Header.Get("X-CallbackToken"), "callback-secret"; got != want {
+			t.Fatalf("X-CallbackToken = %q, want %q", got, want)
+		}
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewBufferString(`{"status":"submitted"}`)),
+		}, nil
+	})}
+	c := &arcadeClient{
+		base:          "http://arcade.test",
+		http:          arcadeHTTP,
+		concurrency:   make(chan struct{}, 1),
+		retryMax:      1,
+		logger:        slog.Default(),
+		callbackToken: "callback-secret",
+	}
+
+	if err := c.BroadcastKnownTx(context.Background(), "tx", testTxID, []byte{1, 2, 3}); err != nil {
+		t.Fatalf("BroadcastKnownTx: %v", err)
 	}
 }
 
@@ -287,6 +386,35 @@ func TestChainTermination(t *testing.T) {
 
 	if got := fb.count.Load(); got != 3 {
 		t.Errorf("broadcast count = %d, want 3 (21→14→7→0)", got)
+	}
+}
+
+func TestRunChainBroadcastsAfterInitialJitter(t *testing.T) {
+	oldRandInt63n := randInt63n
+	randInt63n = func(int64) int64 { return 0 }
+	t.Cleanup(func() { randInt63n = oldRandInt63n })
+
+	fb := &fakeBroadcaster{}
+	e := newTestEngine(fb)
+	e.chainsActiveCnt.Add(1)
+	e.SetTPS(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		e.runChain(ctx, UTXO{TxHash: testTxID, TxPos: 0, Value: sustainFee})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("runChain did not broadcast after initial jitter")
+	}
+	if got := fb.count.Load(); got != 1 {
+		t.Fatalf("broadcast count = %d, want 1", got)
 	}
 }
 

@@ -11,6 +11,7 @@ Optional with defaults:
 - LOG_LEVEL=info
 - LOG_FORMAT=json
 - ARCADE_BASE_URL=https://arcade-v2-us-1.bsvblockchain.tech
+- ARCADE_CALLBACK_TOKEN= (empty = disable Arcade transaction-event SSE)
 - WOC_BASE_URL=https://api.whatsonchain.com/v1/bsv/main
 - PRIVATE_KEY= (empty = OP_CODESEPARATOR mode; WIF or 32-byte hex = P2PKH mode)
 - NUM_CHAINS=10000
@@ -49,6 +50,18 @@ Stop with SIGINT/SIGTERM.
 - GET /metrics : Prometheus metrics including txgen_reorg_total{depth}
 - POST /config : set target TPS (auth Bearer ADMIN_TOKEN, body {"tps":N})
 - POST /stop : optional alias for {"tps":0}
+
+## Arcade Transaction Events
+
+Set ARCADE_CALLBACK_TOKEN to enable per-transaction Arcade SSE events. Broadcast
+requests include the token as X-CallbackToken, and the service subscribes to:
+
+```
+${ARCADE_BASE_URL}/events?callbackToken=<url-encoded-token>
+```
+
+Events are logged as "Arcade tx SSE" with the raw payload plus parsed txid/status
+fields when present. Use `GET /arcade/tx/<txid>` for an on-demand status lookup.
 
 ## Slack Alerts vs Notable Events
 

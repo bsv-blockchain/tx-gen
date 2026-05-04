@@ -12,6 +12,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-debug}
       LOG_FORMAT: ${LOG_FORMAT:-json}
       ARCADE_BASE_URL: ${ARCADE_BASE_URL:-https://arcade-v2-us-1.bsvblockchain.tech}
+      ARCADE_CALLBACK_TOKEN: ${ARCADE_CALLBACK_TOKEN:-tx-gen-local-callback}
       WOC_BASE_URL: ${WOC_BASE_URL:-https://api.whatsonchain.com/v1/bsv/main}
       NUM_CHAINS: ${NUM_CHAINS:-10000}
       FANOUT_SIZE: ${FANOUT_SIZE:-100}
@@ -28,5 +29,37 @@ services:
       INSTANCE_ID: ${INSTANCE_ID:-local}
     restart: unless-stopped
 
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus-rules.yml:/etc/prometheus/rules.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - tx-gen
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANONYMOUS_ENABLED:-true}
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
 volumes:
   tx-gen-data:
+  prometheus-data:
+  grafana-data:

@@ -16,6 +16,7 @@ type Config struct {
 	LogLevel             string
 	LogFormat            string
 	ArcadeBaseURL        string
+	ArcadeCallbackToken  string
 	WOCBaseURL           string
 	PrivateKey           string
 	NumChains            int
@@ -80,6 +81,7 @@ func LoadConfig() (*Config, error) {
 		LogLevel:             getEnv("LOG_LEVEL", "info"),
 		LogFormat:            getEnv("LOG_FORMAT", "json"),
 		ArcadeBaseURL:        getEnv("ARCADE_BASE_URL", "https://arcade-v2-us-1.bsvblockchain.tech"),
+		ArcadeCallbackToken:  strings.TrimSpace(getEnv("ARCADE_CALLBACK_TOKEN", "")),
 		WOCBaseURL:           getEnv("WOC_BASE_URL", "https://api.whatsonchain.com/v1/bsv/main"),
 		PrivateKey:           privateKey,
 		NumChains:            getEnvInt("NUM_CHAINS", 10000),
@@ -110,6 +112,9 @@ func (c *Config) String() string {
 	if redacted.PrivateKey != "" {
 		redacted.PrivateKey = "***"
 	}
+	if redacted.ArcadeCallbackToken != "" {
+		redacted.ArcadeCallbackToken = "***"
+	}
 	if redacted.SlackWebhookURL != "" {
 		redacted.SlackWebhookURL = "***"
 	}
@@ -124,6 +129,9 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 	}
 	if redacted.PrivateKey != "" {
 		redacted.PrivateKey = "***"
+	}
+	if redacted.ArcadeCallbackToken != "" {
+		redacted.ArcadeCallbackToken = "***"
 	}
 	if redacted.SlackWebhookURL != "" {
 		redacted.SlackWebhookURL = "***"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -51,6 +52,7 @@ func newServerWithConfig(engine *Engine, cfg *Config, store *Store, logger *slog
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.HandleFunc("GET /status", s.handleStatus)
+	s.mux.HandleFunc("GET /arcade/tx/{txid}", s.handleArcadeTxStatus)
 	RegisterMetrics(s.mux)
 	return s
 }
@@ -160,6 +162,38 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleArcadeTxStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(r) {
+		s.authFailed(r)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	txid := r.PathValue("txid")
+	if !validTxID(txid) {
+		http.Error(w, "invalid txid", http.StatusBadRequest)
+		return
+	}
+	if s.engine == nil || s.engine.arcade == nil {
+		http.Error(w, "arcade client unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	statusCode, body, err := s.engine.arcade.TxStatus(r.Context(), txid)
+	if err != nil {
+		s.logger.Warn("arcade tx status", "txid", txid, "error", err)
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	if json.Valid([]byte(body)) {
+		w.Header().Set("Content-Type", "application/json")
+	} else {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	w.WriteHeader(statusCode)
+	if _, err := w.Write([]byte(body)); err != nil {
+		s.logger.Warn("write arcade tx status response", "error", err)
+	}
+}
+
 func (s *Server) prepareAuthenticatedPost(w http.ResponseWriter, r *http.Request) bool {
 	if !s.authorized(r) {
 		s.authFailed(r)
@@ -187,6 +221,14 @@ func (s *Server) authorized(r *http.Request) bool {
 	got := sha256.Sum256([]byte(token))
 	want := sha256.Sum256([]byte(s.adminToken))
 	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
+}
+
+func validTxID(txid string) bool {
+	if len(txid) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(txid)
+	return err == nil
 }
 
 func (s *Server) authFailed(r *http.Request) {
@@ -374,6 +416,9 @@ func redactedConfig(cfg *Config) any {
 	}
 	if redacted.PrivateKey != "" {
 		redacted.PrivateKey = "***"
+	}
+	if redacted.ArcadeCallbackToken != "" {
+		redacted.ArcadeCallbackToken = "***"
 	}
 	if redacted.SlackWebhookURL != "" {
 		redacted.SlackWebhookURL = "***"

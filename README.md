@@ -37,6 +37,7 @@ go build -o bsv-tx-gen .
 | `PORT` | no | `8080` | HTTP listen port |
 | `PRIVATE_KEY` | no | empty | Enables P2PKH mode when set. Accepts WIF or 32-byte hex private keys. |
 | `SUSTAIN_FEE` | no | `7` or `20` | Satoshis per sustain hop. Defaults to `7` for OP_CODESEPARATOR and `20` for P2PKH. |
+| `ARCADE_CALLBACK_TOKEN` | no | empty | Enables Arcade transaction-event SSE. Broadcasts include this as `X-CallbackToken`; the service subscribes to `/events?callbackToken=...`. |
 
 ## Running
 
@@ -46,6 +47,20 @@ source .env
 ```
 
 On startup the service logs its scripthash, fetches UTXOs, and begins bootstrap (or resumes). TPS starts at 0 — no transactions are sent until you set a rate.
+
+## Local Monitoring
+
+Docker Compose starts Prometheus and Grafana alongside the service:
+
+```sh
+docker compose up -d --build
+```
+
+- Grafana: http://localhost:3000, default `admin` / `admin`
+- Prometheus: http://localhost:9090
+- tx-gen metrics: http://localhost:8080/metrics
+
+Grafana is provisioned with the `tx-gen Overview` dashboard under the `Local` folder. Override ports or Grafana credentials with `GRAFANA_PORT`, `PROMETHEUS_PORT`, `GRAFANA_ADMIN_USER`, and `GRAFANA_ADMIN_PASSWORD`.
 
 ## Setting TPS
 
@@ -92,6 +107,7 @@ See RUNBOOK.md for complete table. Key ops vars:
 | `STATE_PATH` | `./state.db` | BoltDB location; backup before restart |
 | `NUM_CHAINS` | `10000` | Target chains (fanout * sustain) |
 | `FANOUT_SIZE` | `100` | L1 fanout width |
+| `ARCADE_CALLBACK_TOKEN` | (empty) | Enables Arcade tx event SSE and `X-CallbackToken` broadcast header |
 | `PRIVATE_KEY` | (empty) | Enables P2PKH lock/unlock and P2PKH scripthash lookup |
 | `SUSTAIN_FEE` | `7` or `20` | Satoshis per sustain hop; P2PKH default is `20` |
 | `MAX_TPS` | `10000` | Hard cap (degrade if requested > capacity) |
@@ -104,6 +120,7 @@ See RUNBOOK.md for complete table. Key ops vars:
 - `GET /healthz` — 200 liveness (always after start)
 - `GET /readyz` — 200 after bootstrap complete
 - `GET /status` — EngineState snapshot (TPS, chains, lastReorg, bootstrapStage, lastError)
+- `GET /arcade/tx/{txid}` — Authenticated proxy to Arcade's transaction status endpoint for a specific txid
 - `GET /metrics` — Prometheus (txgen_broadcast_total, txgen_reorg_total{depth}, queue_depth, chains_active, tps_target, panic_total etc.)
 - `POST /config` — SetTPS (auth: Bearer ADMIN_TOKEN, body `{"tps": N}`)
 - `POST /stop` — convenience alias for `{"tps":0}` (optional)
@@ -113,9 +130,12 @@ See RUNBOOK.md for complete table. Key ops vars:
 - Pause: `POST /config -d '{"tps":0}'`
 - Resume: `POST /config -d '{"tps":16}'`
 - Check degraded: `curl /status | jq .state`
+- Check Arcade status: `curl -H "Authorization: Bearer $ADMIN_TOKEN" /arcade/tx/<txid>`
 - Reorg evidence: logs "reorg", `/metrics` txgen_reorg_total, Slack post (if webhook), `/status.lastReorg`
 - Restart with resume: keep `state.db` (active tips + structured pending replay, no re-bootstrap after `l2_done`)
 - Bootstrap `l2_partial` or `unknown`: keep `state.db`, check `/status.lastError`, and reconcile with WoC before restarting generation
+
+When `ARCADE_CALLBACK_TOKEN` is set, broadcasts include `X-CallbackToken` and the service subscribes to Arcade transaction events at `/events?callbackToken=...`. Those events are logged as `Arcade tx SSE` with the raw Arcade payload plus parsed `txid` and `tx_status` when present. Immediate `/tx` broadcast responses are logged at debug level and status can also be checked later with `GET /arcade/tx/{txid}`.
 
 ## Reorg Case-Study Note
 

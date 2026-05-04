@@ -34,6 +34,8 @@ var (
 	chainTerminatedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "txgen_chain_terminated_total", Help: "Chains terminated"}, []string{"reason"})
 )
 
+var knownBootstrapStages = []string{"none", "l1_done", "l2_partial", "l2_done", "unknown"}
+
 func init() {
 	prometheus.MustRegister(broadcastTotal, broadcastLatency, queueDepth, chainsActive, tpsTarget, sseConnected, sseEventTotal, sseDisconnectTotal, reorgTotal, bootstrapStage, panicTotal, authFailTotal, chainTerminatedTotal)
 }
@@ -103,6 +105,9 @@ func IncChainTerminated(reason string) {
 }
 
 func SetBootstrapStage(stage string) {
+	for _, known := range knownBootstrapStages {
+		bootstrapStage.WithLabelValues(known).Set(0)
+	}
 	bootstrapStage.WithLabelValues(stage).Set(1)
 }
 

@@ -1,0 +1,47 @@
+groups:
+  - name: tx-gen.local
+    rules:
+      - alert: TxGenNoAcceptedBroadcasts
+        expr: txgen_tps_target > 0 unless rate(txgen_broadcast_total{kind="tx",result="ok"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: tx-gen is not accepting broadcasts while TPS is positive
+          description: Target TPS is positive, but accepted broadcast rate has been zero for 5 minutes.
+
+      - alert: TxGenNoActiveChains
+        expr: txgen_chains_active == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: tx-gen has no active chains
+          description: Active chain count is zero.
+
+      - alert: TxGenBootstrapNotDone
+        expr: txgen_bootstrap_stage{stage="l2_done"} != 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: tx-gen bootstrap is not complete
+          description: Bootstrap stage is not l2_done.
+
+      - alert: TxGenBroadcastErrors
+        expr: increase(txgen_broadcast_total{result="error"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: tx-gen broadcast errors detected
+          description: Broadcast errors increased in the last 5 minutes.
+
+      - alert: TxGenSSEDisconnected
+        expr: txgen_sse_connected == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: tx-gen SSE stream disconnected
+          description: One or more SSE streams have been disconnected for at least 2 minutes.

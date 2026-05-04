@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -45,10 +46,12 @@ func startSSESubscribers(ctx context.Context, engine *Engine, cfg *Config, logge
 		wg = &sync.WaitGroup{}
 	}
 	base := arcadeBase
+	callbackToken := ""
 	reconnectMin := time.Second
 	reconnectMax := 30 * time.Second
 	if cfg != nil {
 		base = cfg.ArcadeBaseURL
+		callbackToken = cfg.ArcadeCallbackToken
 		reconnectMin = cfg.SSEReconnectInitial
 		reconnectMax = cfg.SSEReconnectMax
 	}
@@ -62,6 +65,7 @@ func startSSESubscribers(ctx context.Context, engine *Engine, cfg *Config, logge
 	client := NewHTTPClient(SSETransport(), 0)
 	tipURL := strings.TrimRight(base, "/") + "/chaintracks/v2/tip/stream"
 	reorgURL := strings.TrimRight(base, "/") + "/chaintracks/v2/reorg/stream"
+	eventsURL := strings.TrimRight(base, "/") + "/events?callbackToken=" + url.QueryEscape(callbackToken)
 
 	SafeGo(wg, "sse_tip", func() {
 		streamLoop(ctx, client, tipURL, "tip", reconnectMin, reconnectMax, logger, func(data []byte) {
@@ -73,6 +77,15 @@ func startSSESubscribers(ctx context.Context, engine *Engine, cfg *Config, logge
 			handleReorgEvent(engine, logger, notifier, data)
 		})
 	})
+	if callbackToken != "" {
+		SafeGo(wg, "sse_arcade_tx", func() {
+			streamLoop(ctx, client, eventsURL, "arcade_tx", reconnectMin, reconnectMax, logger, func(data []byte) {
+				handleArcadeTxEvent(logger, data)
+			})
+		})
+	} else {
+		logger.Info("Arcade tx SSE disabled", "reason", "ARCADE_CALLBACK_TOKEN not set")
+	}
 }
 
 func handleTipEvent(engine *Engine, logger *slog.Logger, data []byte) {
@@ -127,6 +140,65 @@ func handleReorgEvent(engine *Engine, logger *slog.Logger, notifier *Notifier, d
 		"tip_after", tipAfter,
 		"tip_after_height", tipAfterHeight,
 	)
+}
+
+func handleArcadeTxEvent(logger *slog.Logger, data []byte) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	var payload map[string]any
+	raw := string(data)
+	if err := json.Unmarshal(data, &payload); err != nil {
+		logger.Warn("Arcade tx SSE parse error", "error", err, "raw", truncateString(raw, 4096))
+		return
+	}
+	txid := jsonString(payload, "txid", "txId", "transactionId", "transactionID")
+	status := jsonString(payload, "txStatus", "tx_status", "status")
+	eventType := jsonString(payload, "type", "event", "eventType")
+	extraInfo := jsonString(payload, "extraInfo", "extra_info", "reason", "message")
+	if nested, ok := payload["data"].(map[string]any); ok {
+		if txid == "" {
+			txid = jsonString(nested, "txid", "txId", "transactionId", "transactionID")
+		}
+		if status == "" {
+			status = jsonString(nested, "txStatus", "tx_status", "status")
+		}
+		if eventType == "" {
+			eventType = jsonString(nested, "type", "event", "eventType")
+		}
+		if extraInfo == "" {
+			extraInfo = jsonString(nested, "extraInfo", "extra_info", "reason", "message")
+		}
+	}
+
+	level := slog.LevelDebug
+	if strings.EqualFold(status, "rejected") {
+		level = slog.LevelWarn
+	}
+	attrs := []any{"raw", truncateString(raw, 4096)}
+	if txid != "" {
+		attrs = append(attrs, "txid", txid)
+	}
+	if status != "" {
+		attrs = append(attrs, "tx_status", status)
+	}
+	if eventType != "" {
+		attrs = append(attrs, "event_type", eventType)
+	}
+	if extraInfo != "" {
+		attrs = append(attrs, "extra_info", extraInfo)
+	}
+	logger.Log(context.Background(), level, "Arcade tx SSE", attrs...)
+	IncSSEEvent("arcade_tx")
+}
+
+func jsonString(payload map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := payload[key].(string); ok {
+			return v
+		}
+	}
+	return ""
 }
 
 func reorgHeight(r ReorgEvent) int {

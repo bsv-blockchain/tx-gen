@@ -18,11 +18,17 @@ type Broadcaster interface {
 	Broadcast(ctx context.Context, ef []byte) error
 }
 
+type knownTxBroadcaster interface {
+	BroadcastKnownTx(ctx context.Context, kind, txid string, ef []byte) error
+}
+
 // UTXOSource fetches unspent outputs for a script hash.
 // Implemented by wocClient; injectable for tests.
 type UTXOSource interface {
 	FetchUTXOs(ctx context.Context, scriptHash string) ([]UTXO, error)
 }
+
+var randInt63n = rand.Int63n
 
 // Lifecycle represents the engine operating state.
 type Lifecycle string
@@ -308,6 +314,13 @@ func (e *Engine) recordBroadcastFail(component, msg string) {
 	})
 }
 
+func (e *Engine) broadcastTx(ctx context.Context, txid string, efBytes []byte) error {
+	if b, ok := e.broadcaster.(knownTxBroadcaster); ok {
+		return b.BroadcastKnownTx(ctx, "tx", txid, efBytes)
+	}
+	return e.broadcaster.Broadcast(ctx, efBytes)
+}
+
 // run is the main engine entry point called from main.go via runSafe.
 func (e *Engine) run(ctx context.Context) {
 	var infraWG sync.WaitGroup
@@ -329,8 +342,22 @@ func (e *Engine) run(ctx context.Context) {
 	case stage == "l1_done":
 		log.Printf("bootstrap: L2 fanout from persisted stage (%d → %d)", qlen, e.numChains)
 		bootstrapErr = e.bootstrapL2(ctx)
-	case stage == "l2_partial" || stage == "unknown":
-		bootstrapErr = fmt.Errorf("bootstrap stage %q requires WoC reconciliation before restart", stage)
+	case stage == "l2_partial":
+		// WoC reconciliation removed; trust queue state from store.
+		if qlen >= e.numChains {
+			log.Printf("resuming with %d existing UTXOs (l2_partial → l2_done)", qlen)
+			e.setBootstrapStage("l2_done")
+		} else if qlen == e.fanoutSize {
+			log.Printf("bootstrap: L2 fanout from l2_partial (%d → %d)", qlen, e.numChains)
+			bootstrapErr = e.bootstrapL2(ctx)
+		} else if qlen > 0 {
+			log.Printf("resuming with %d existing UTXOs (partial L2)", qlen)
+			e.setBootstrapStage("l2_done")
+		} else {
+			bootstrapErr = fmt.Errorf("l2_partial with empty queue: re-seed required")
+		}
+	case stage == "unknown":
+		bootstrapErr = fmt.Errorf("bootstrap stage %q requires manual recovery", stage)
 	case qlen == 1:
 		log.Printf("bootstrap: L1 + L2 fanout (1 → %d → %d)", e.fanoutSize, e.numChains)
 		bootstrapErr = e.bootstrapFull(ctx)
@@ -402,7 +429,7 @@ func (e *Engine) bootstrapFull(ctx context.Context) error {
 			e.queue.PushMemory(utxo)
 			return fmt.Errorf("save L1 pending: %w", err)
 		}
-		if broadcastErr = e.broadcaster.Broadcast(ctx, efBytes); broadcastErr == nil {
+		if broadcastErr = e.broadcastTx(ctx, txid, efBytes); broadcastErr == nil {
 			break
 		}
 		e.clearPending(txid)
@@ -501,7 +528,7 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 
 			var bcastErr error
 			for attempt := 1; attempt <= 3; attempt++ {
-				if bcastErr = e.broadcaster.Broadcast(ctx, ef); bcastErr == nil {
+				if bcastErr = e.broadcastTx(ctx, txid, ef); bcastErr == nil {
 					break
 				}
 				log.Printf("L2 broadcast attempt %d for %s: %v", attempt, parent.TxHash, bcastErr)
@@ -570,36 +597,6 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 		return fmt.Errorf("%s", msg)
 	}
 
-	if e.source != nil {
-		discovered, rerr := e.source.FetchUTXOs(ctx, scriptHash(e.mode().LockScript))
-		e.setState(func(s *EngineState) {
-			s.LastWoCTime = time.Now()
-			if rerr != nil {
-				s.LastWoCResult = "error"
-			} else {
-				s.LastWoCResult = fmt.Sprintf("%d UTXOs", len(discovered))
-			}
-		})
-		if rerr != nil {
-			e.setState(func(s *EngineState) {
-				s.BootstrapStage = "l2_partial"
-				s.LastError = &ErrorRecord{Component: "woc_reconcile", Msg: rerr.Error(), Time: time.Now()}
-			})
-			e.setBootstrapStage("l2_partial")
-			return fmt.Errorf("woc reconcile: %w", rerr)
-		}
-		if missing := missingUTXOs(expected, discovered); len(missing) > 0 {
-			msg := fmt.Sprintf("WoC missing %d expected L2 UTXOs out of %d", len(missing), len(expected))
-			e.setState(func(s *EngineState) {
-				s.Lifecycle = LifecycleDegraded
-				s.BootstrapStage = "l2_partial"
-				s.LastError = &ErrorRecord{Component: "woc_reconcile", Msg: msg, Time: time.Now()}
-			})
-			e.setBootstrapStage("l2_partial")
-			return fmt.Errorf("%s", msg)
-		}
-	}
-
 	e.setBootstrapStage("l2_done")
 	return nil
 }
@@ -630,6 +627,7 @@ func (e *Engine) startChains(ctx context.Context) {
 		count++
 	}
 	log.Printf("started %d chains", count)
+	SetQueueDepth(e.queue.Len())
 	<-ctx.Done()
 	e.setState(func(s *EngineState) { s.Lifecycle = LifecycleStopped })
 	chainWG.Wait()
@@ -656,39 +654,74 @@ func chainInterval(tps, chains int64) time.Duration {
 	return time.Duration(float64(chains) / float64(tps) * float64(time.Second))
 }
 
-func (e *Engine) runChain(ctx context.Context, utxo UTXO) {
-	tps, ok := e.waitActive(ctx)
-	if !ok {
-		return
+func jitterDuration(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
 	}
-	chains := e.chainsActiveCnt.Load()
-	jitter := time.Duration(rand.Int63n(int64(chainInterval(tps, chains)) + 1))
+	return time.Duration(randInt63n(int64(max) + 1))
+}
+
+func (e *Engine) waitDuration(ctx context.Context, d time.Duration) (elapsed bool, ok bool) {
+	if d <= 0 {
+		return true, true
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return
-	case <-time.After(jitter):
+		return false, false
+	case <-timer.C:
+		return true, true
+	case <-e.resume.C():
+		return false, true
 	}
+}
 
+func (e *Engine) waitInitialJitter(ctx context.Context) bool {
 	for {
 		tps, ok := e.waitActive(ctx)
 		if !ok {
-			return
+			return false
 		}
-		chains := e.chainsActiveCnt.Load()
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(chainInterval(tps, chains)):
-		case <-e.resume.C():
-			// TPS changed — skip this tick, re-read the new rate.
-			continue
+		elapsed, ok := e.waitDuration(ctx, jitterDuration(chainInterval(tps, e.chainsActiveCnt.Load())))
+		if !ok {
+			return false
 		}
+		if elapsed {
+			return true
+		}
+	}
+}
 
+func (e *Engine) waitNextInterval(ctx context.Context) bool {
+	for {
+		tps, ok := e.waitActive(ctx)
+		if !ok {
+			return false
+		}
+		elapsed, ok := e.waitDuration(ctx, chainInterval(tps, e.chainsActiveCnt.Load()))
+		if !ok {
+			return false
+		}
+		if elapsed {
+			return true
+		}
+	}
+}
+
+func (e *Engine) runChain(ctx context.Context, utxo UTXO) {
+	if !e.waitInitialJitter(ctx) {
+		return
+	}
+
+	for {
 		mode := e.mode()
 		txid, efBytes, newUTXO, err := buildSustainTxWithMode(utxo, mode)
 		if err != nil {
 			log.Printf("sustain build %s:%d: %v", utxo.TxHash, utxo.TxPos, err)
+			if !e.waitNextInterval(ctx) {
+				return
+			}
 			continue
 		}
 		newUTXO.TxHash = txid
@@ -704,10 +737,13 @@ func (e *Engine) runChain(ctx context.Context, utxo UTXO) {
 			log.Printf("sustain pending %s:%d: %v", utxo.TxHash, utxo.TxPos, err)
 			return
 		}
-		if err := e.broadcaster.Broadcast(ctx, efBytes); err != nil {
+		if err := e.broadcastTx(ctx, txid, efBytes); err != nil {
 			e.clearPending(txid)
 			e.recordBroadcastFail("arcade", err.Error())
 			log.Printf("sustain broadcast %s:%d: %v — retry next tick", utxo.TxHash, utxo.TxPos, err)
+			if !e.waitNextInterval(ctx) {
+				return
+			}
 			continue
 		}
 
@@ -726,6 +762,9 @@ func (e *Engine) runChain(ctx context.Context, utxo UTXO) {
 			return
 		}
 		utxo = newUTXO
+		if !e.waitNextInterval(ctx) {
+			return
+		}
 	}
 }
 
@@ -789,18 +828,4 @@ func (e *Engine) replayPending() (bool, error) {
 		SetBootstrapStage("unknown")
 	}
 	return changed, nil
-}
-
-func missingUTXOs(expected, discovered []UTXO) []UTXO {
-	found := make(map[string]struct{}, len(discovered))
-	for _, u := range discovered {
-		found[utxoKey(u.TxHash, u.TxPos)] = struct{}{}
-	}
-	var missing []UTXO
-	for _, u := range expected {
-		if _, ok := found[utxoKey(u.TxHash, u.TxPos)]; !ok {
-			missing = append(missing, u)
-		}
-	}
-	return missing
 }

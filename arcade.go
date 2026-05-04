@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,12 +16,13 @@ import (
 const arcadeBase = "https://arcade-v2-us-1.bsvblockchain.tech"
 
 type arcadeClient struct {
-	base        string
-	http        *http.Client
-	concurrency chan struct{}
-	retryMax    int
-	logger      *slog.Logger
-	store       *Store
+	base          string
+	http          *http.Client
+	concurrency   chan struct{}
+	retryMax      int
+	logger        *slog.Logger
+	store         *Store
+	callbackToken string
 }
 
 func newArcadeClientWithConfig(cfg *Config, store *Store, logger *slog.Logger) *arcadeClient {
@@ -31,11 +33,13 @@ func newArcadeClientWithConfig(cfg *Config, store *Store, logger *slog.Logger) *
 	timeout := 30 * time.Second
 	concurrency := 64
 	retryMax := 3
+	callbackToken := ""
 	if cfg != nil {
 		base = cfg.ArcadeBaseURL
 		timeout = cfg.HTTPTimeout
 		concurrency = cfg.BroadcastConcurrency
 		retryMax = cfg.BroadcastRetryMax
+		callbackToken = cfg.ArcadeCallbackToken
 	}
 	if concurrency <= 0 {
 		concurrency = 64
@@ -44,12 +48,13 @@ func newArcadeClientWithConfig(cfg *Config, store *Store, logger *slog.Logger) *
 		retryMax = 1
 	}
 	return &arcadeClient{
-		base:        strings.TrimRight(base, "/"),
-		http:        NewHTTPClient(ArcadeTransport(), timeout),
-		concurrency: make(chan struct{}, concurrency),
-		retryMax:    retryMax,
-		logger:      logger,
-		store:       store,
+		base:          strings.TrimRight(base, "/"),
+		http:          NewHTTPClient(ArcadeTransport(), timeout),
+		concurrency:   make(chan struct{}, concurrency),
+		retryMax:      retryMax,
+		logger:        logger,
+		store:         store,
+		callbackToken: callbackToken,
 	}
 }
 
@@ -61,7 +66,14 @@ func (c *arcadeClient) BroadcastKind(ctx context.Context, kind string, efBytes [
 	if kind == "" {
 		kind = "tx"
 	}
-	return c.broadcastWithKind(ctx, kind, efBytes)
+	return c.broadcastWithKindTxID(ctx, kind, "", efBytes)
+}
+
+func (c *arcadeClient) BroadcastKnownTx(ctx context.Context, kind, txid string, efBytes []byte) error {
+	if kind == "" {
+		kind = "tx"
+	}
+	return c.broadcastWithKindTxID(ctx, kind, txid, efBytes)
 }
 
 func (c *arcadeClient) BroadcastTx(ctx context.Context, txid string, efBytes []byte) error {
@@ -74,7 +86,7 @@ func (c *arcadeClient) BroadcastKindTx(ctx context.Context, kind, txid string, e
 			return fmt.Errorf("save pending broadcast: %w", err)
 		}
 	}
-	if err := c.BroadcastKind(ctx, kind, efBytes); err != nil {
+	if err := c.BroadcastKnownTx(ctx, kind, txid, efBytes); err != nil {
 		return err
 	}
 	if txid != "" && c.store != nil {
@@ -86,6 +98,10 @@ func (c *arcadeClient) BroadcastKindTx(ctx context.Context, kind, txid string, e
 }
 
 func (c *arcadeClient) broadcastWithKind(ctx context.Context, kind string, efBytes []byte) error {
+	return c.broadcastWithKindTxID(ctx, kind, "", efBytes)
+}
+
+func (c *arcadeClient) broadcastWithKindTxID(ctx context.Context, kind, txid string, efBytes []byte) error {
 	if err := c.acquire(ctx); err != nil {
 		return err
 	}
@@ -100,6 +116,7 @@ func (c *arcadeClient) broadcastWithKind(ctx context.Context, kind string, efByt
 
 		if err == nil && statusCode == http.StatusAccepted {
 			IncBroadcast(kind, "ok")
+			c.logBroadcastResponse(ctx, slog.LevelDebug, "arcade broadcast accepted", kind, txid, attempt, statusCode, body, latency, nil)
 			return nil
 		}
 
@@ -114,17 +131,64 @@ func (c *arcadeClient) broadcastWithKind(ctx context.Context, kind string, efByt
 
 		if !retryable || attempt == c.retryMax {
 			IncBroadcast(kind, "error")
+			c.logBroadcastResponse(ctx, slog.LevelWarn, "arcade broadcast rejected", kind, txid, attempt, statusCode, body, latency, lastErr)
 			return lastErr
 		}
 
 		IncBroadcast(kind, "retry")
 		backoff := retryBackoff(attempt)
-		c.logger.Warn("arcade broadcast retry", "attempt", attempt, "backoff", backoff, "error", lastErr)
+		c.logBroadcastResponse(ctx, slog.LevelWarn, "arcade broadcast retry", kind, txid, attempt, statusCode, body, latency, lastErr, "backoff", backoff)
 		if err := sleepContext(ctx, backoff); err != nil {
 			return err
 		}
 	}
 	return lastErr
+}
+
+func (c *arcadeClient) logBroadcastResponse(ctx context.Context, level slog.Level, msg, kind, txid string, attempt, statusCode int, body string, latency time.Duration, err error, extra ...any) {
+	if c.logger == nil || !c.logger.Enabled(ctx, level) {
+		return
+	}
+	attrs := []any{
+		"kind", kind,
+		"attempt", attempt,
+		"http_status", statusCode,
+		"latency", latency,
+	}
+	if txid != "" {
+		attrs = append(attrs, "txid", txid)
+	}
+	if txStatus := arcadeTxStatus(body); txStatus != "" {
+		attrs = append(attrs, "tx_status", txStatus)
+	}
+	if body != "" {
+		attrs = append(attrs, "response", truncateString(body, 4096))
+	}
+	if err != nil {
+		attrs = append(attrs, "error", err)
+	}
+	attrs = append(attrs, extra...)
+	c.logger.Log(ctx, level, msg, attrs...)
+}
+
+func arcadeTxStatus(body string) string {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return ""
+	}
+	for _, key := range []string{"txStatus", "tx_status", "status"} {
+		if status, ok := payload[key].(string); ok {
+			return status
+		}
+	}
+	return ""
+}
+
+func truncateString(s string, limit int) string {
+	if limit <= 0 || len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "...[truncated]"
 }
 
 func (c *arcadeClient) postEF(ctx context.Context, efBytes []byte) (int, string, error) {
@@ -133,6 +197,28 @@ func (c *arcadeClient) postEF(ctx context.Context, efBytes []byte) (int, string,
 		return 0, "", err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
+	if c.callbackToken != "" {
+		req.Header.Set("X-CallbackToken", c.callbackToken)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return resp.StatusCode, string(body), nil
+}
+
+func (c *arcadeClient) TxStatus(ctx context.Context, txid string) (int, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/tx/"+txid, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
