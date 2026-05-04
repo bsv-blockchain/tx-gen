@@ -93,10 +93,17 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		TPS int64 `json:"tps"`
+		TPS        *int64  `json:"tps"`
+		NumChains  *int    `json:"numChains"`
+		FanoutSize *int    `json:"fanoutSize"`
+		SustainFee *uint64 `json:"sustainFee"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.TPS == nil && req.NumChains == nil && req.FanoutSize == nil && req.SustainFee == nil {
+		http.Error(w, "no config fields supplied", http.StatusBadRequest)
 		return
 	}
 
@@ -104,17 +111,50 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if s.cfg != nil && s.cfg.MaxTPS > 0 {
 		maxTPS = int64(s.cfg.MaxTPS)
 	}
-	if req.TPS < 0 || req.TPS > maxTPS {
+	if req.TPS != nil && (*req.TPS < 0 || *req.TPS > maxTPS) {
 		http.Error(w, "tps must be 0-"+strconv.FormatInt(maxTPS, 10), http.StatusBadRequest)
 		return
 	}
+	if req.NumChains != nil && *req.NumChains <= 0 {
+		http.Error(w, "numChains must be positive", http.StatusBadRequest)
+		return
+	}
+	if req.FanoutSize != nil && *req.FanoutSize <= 0 {
+		http.Error(w, "fanoutSize must be positive", http.StatusBadRequest)
+		return
+	}
+	if req.SustainFee != nil && *req.SustainFee == 0 {
+		http.Error(w, "sustainFee must be positive", http.StatusBadRequest)
+		return
+	}
 
-	s.engine.SetTPS(req.TPS)
-	SetTPSTarget(int(req.TPS))
-	s.logger.Info("TPS updated", "tps", req.TPS)
+	response := map[string]any{}
+	if req.NumChains != nil || req.FanoutSize != nil || req.SustainFee != nil {
+		cfg, err := s.engine.ConfigureBootstrap(req.NumChains, req.FanoutSize, req.SustainFee)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		if s.cfg != nil {
+			s.cfg.NumChains = cfg.NumChains
+			s.cfg.FanoutSize = cfg.FanoutSize
+			s.cfg.SustainFee = cfg.SustainFee
+		}
+		response["numChains"] = cfg.NumChains
+		response["fanoutSize"] = cfg.FanoutSize
+		response["sustainFee"] = cfg.SustainFee
+		s.logger.Info("bootstrap config updated", "numChains", cfg.NumChains, "fanoutSize", cfg.FanoutSize, "sustainFee", cfg.SustainFee)
+	}
+
+	if req.TPS != nil {
+		s.engine.SetTPS(*req.TPS)
+		SetTPSTarget(int(*req.TPS))
+		response["tps"] = *req.TPS
+		s.logger.Info("TPS updated", "tps", *req.TPS)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]int64{"tps": req.TPS}); err != nil {
+	if err := json.NewEncoder(w).Encode(response); err != nil {
 		s.logger.Warn("write config response", "error", err)
 	}
 }

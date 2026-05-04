@@ -58,9 +58,9 @@ npm install
 INSTANCE_ID=deggen npm run fund:initial
 ```
 
-Requires Node 22.6+. The script also loads `.env` from the repo root. It prompts for target TPS and duration, derives `NUM_CHAINS` from `TPS * UTXO_IDLE_SECONDS` (default `600`, or 10 minutes), estimates the initial output value using `FANOUT_SIZE` and `SUSTAIN_FEE`, asks BSV Desktop to create a no-send wallet action, converts the returned Atomic BEEF with `Transaction.fromBEEF(tx).toEF()`, and posts it to `${ARCADE_BASE_URL}/tx`. The printed `NUM_CHAINS` and `FANOUT_SIZE` values should be used when starting the Go service.
+Requires Node 22.6+. The script also loads `.env` from the repo root. It prompts for target TPS and duration, derives `NUM_CHAINS` from `TPS * UTXO_IDLE_SECONDS` (default `600`, or 10 minutes), derives `FANOUT_SIZE` from roughly `sqrt(NUM_CHAINS)`, estimates the initial output value using `SUSTAIN_FEE`, and can apply `tps`, `numChains`, `fanoutSize`, and `sustainFee` to a running tx-gen service via authenticated `POST /config`. It validates the planned bootstrap fanout transactions against a 100 MB transaction-size cap before requesting wallet funding. It then asks BSV Desktop to create a no-send wallet action, converts the returned Atomic BEEF with `Transaction.fromBEEF(tx).toEF()`, and posts it to `${ARCADE_BASE_URL}/tx`.
 
-Optional env vars: `ARCADE_BASE_URL`, `ARCADE_CALLBACK_TOKEN`, `WALLET_ORIGINATOR`, `FUNDING_BASKET`, `FANOUT_SIZE`, `UTXO_IDLE_SECONDS`, `SUSTAIN_FEE`.
+Optional env vars: `TXGEN_BASE_URL`, `ADMIN_TOKEN`, `SKIP_TXGEN_CONFIG`, `ARCADE_BASE_URL`, `ARCADE_CALLBACK_TOKEN`, `WALLET_ORIGINATOR`, `FUNDING_BASKET`, `FANOUT_SIZE` (override), `UTXO_IDLE_SECONDS`, `SUSTAIN_FEE`, `MAX_BOOTSTRAP_TX_BYTES`.
 
 ## Local Monitoring
 
@@ -82,10 +82,10 @@ Grafana is provisioned with the `tx-gen Overview` dashboard under the `Local` fo
 curl -X POST http://localhost:8080/config \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"tps": 16}'
+  -d '{"tps": 16, "numChains": 9600, "fanoutSize": 100, "sustainFee": 7}'
 ```
 
-Valid range: `0`–`10000`. Setting `0` pauses all chains without losing state.
+All fields are optional, but at least one must be supplied. `tps` can be changed at any time; setting it to `0` pauses all chains without losing state. Bootstrap fields (`numChains`, `fanoutSize`, `sustainFee`) are accepted only before the initial funding UTXO is detected.
 
 ## Chain math
 
@@ -121,7 +121,7 @@ See RUNBOOK.md for complete table. Key ops vars:
 |---------|---------|-------|
 | `STATE_PATH` | `./state.db` | BoltDB location; backup before restart |
 | `NUM_CHAINS` | `10000` | Target chain count. The funding script derives this from target TPS and `UTXO_IDLE_SECONDS`. |
-| `FANOUT_SIZE` | `100` | Max outputs per bootstrap fanout transaction. |
+| `FANOUT_SIZE` | `100` | Max outputs per bootstrap fanout transaction. The funding script derives roughly `sqrt(NUM_CHAINS)` unless this is set explicitly. |
 | `ARCADE_CALLBACK_TOKEN` | (empty) | Enables Arcade tx event SSE and `X-CallbackToken` broadcast header |
 | `PRIVATE_KEY` | (empty) | Enables P2PKH lock/unlock and P2PKH scripthash lookup |
 | `SUSTAIN_FEE` | `7` or `20` | Satoshis per sustain hop; P2PKH default is `20` |
@@ -137,7 +137,7 @@ See RUNBOOK.md for complete table. Key ops vars:
 - `GET /status` — EngineState snapshot (TPS, chains, lastReorg, bootstrapStage, lastError)
 - `GET /arcade/tx/{txid}` — Authenticated proxy to Arcade's transaction status endpoint for a specific txid
 - `GET /metrics` — Prometheus (txgen_broadcast_total, txgen_reorg_total{depth}, queue_depth, chains_active, tps_target, panic_total etc.)
-- `POST /config` — SetTPS (auth: Bearer ADMIN_TOKEN, body `{"tps": N}`)
+- `POST /config` — Set TPS and pre-bootstrap parameters (auth: Bearer ADMIN_TOKEN, body can include `tps`, `numChains`, `fanoutSize`, `sustainFee`)
 - `POST /stop` — convenience alias for `{"tps":0}` (optional)
  
 ## Ops Quick Reference

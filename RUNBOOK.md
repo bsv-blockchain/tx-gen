@@ -16,7 +16,7 @@ Optional with defaults:
 - WOC_BASE_URL=https://api.whatsonchain.com/v1/bsv/main
 - PRIVATE_KEY= (empty = tagged-drop mode; WIF or 32-byte hex = P2PKH mode)
 - NUM_CHAINS=10000 (set from the initial funding script for new runs)
-- FANOUT_SIZE=100 (max outputs per bootstrap fanout transaction)
+- FANOUT_SIZE=100 (max outputs per bootstrap fanout transaction; setup script derives roughly sqrt(NUM_CHAINS) unless overridden)
 - SUSTAIN_FEE=7 (defaults to 20 when PRIVATE_KEY is set)
 - MAX_TPS=10000
 - BROADCAST_CONCURRENCY=64
@@ -48,7 +48,7 @@ Stop with SIGINT/SIGTERM.
 - GET /readyz : readiness (after bootstrap)
 - GET /status : JSON snapshot of engine state, redacted config
 - GET /metrics : Prometheus metrics including txgen_reorg_total{depth}
-- POST /config : set target TPS (auth Bearer ADMIN_TOKEN, body {"tps":N})
+- POST /config : set target TPS and pre-bootstrap params (auth Bearer ADMIN_TOKEN, body can include {"tps":N,"numChains":N,"fanoutSize":N,"sustainFee":N})
 - POST /stop : optional alias for {"tps":0}
 
 ## Arcade Transaction Events

@@ -17,6 +17,7 @@ import (
 const sustainFee = 7
 const p2pkhSustainFee = 20
 const lockScriptTagBytes = 6
+const maxTxBytes = 100_000_000
 
 const (
 	txModeTaggedDrop = "tagged_drop"
@@ -233,6 +234,9 @@ func buildFanoutTxWithMode(utxo UTXO, n int, mode *TxMode) (txid string, efBytes
 	}
 	lockScriptLen := len(*mode.LockScript)
 	rawSize := uint64(4 + varIntSize(1) + mode.inputSize() + varIntSize(n) + n*(8+varIntSize(lockScriptLen)+lockScriptLen) + 4)
+	if rawSize > maxTxBytes {
+		return "", nil, nil, fmt.Errorf("fanout tx size %d exceeds max %d", rawSize, maxTxBytes)
+	}
 	fee := (rawSize*100 + 999) / 1000
 
 	if utxo.Value <= fee {

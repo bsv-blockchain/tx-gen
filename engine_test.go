@@ -405,6 +405,50 @@ func TestConfigUsesConfiguredMaxTPS(t *testing.T) {
 	}
 }
 
+func TestConfigUpdatesBootstrapParameters(t *testing.T) {
+	e := newTestEngine(&fakeBroadcaster{})
+	s := newServerWithConfig(e, &Config{AdminToken: "secret", NumChains: 4, FanoutSize: 2, SustainFee: sustainFee}, nil, slog.Default())
+
+	req := httptest.NewRequest(http.MethodPost, "/config", bytes.NewBufferString(`{"tps":2,"numChains":1200,"fanoutSize":100,"sustainFee":7}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if got := e.TPS(); got != 2 {
+		t.Fatalf("TPS = %d, want 2", got)
+	}
+	cfg := e.bootstrapConfig()
+	if cfg.NumChains != 1200 || cfg.FanoutSize != 100 || cfg.SustainFee != 7 {
+		t.Fatalf("bootstrap config = %+v, want numChains=1200 fanoutSize=100 sustainFee=7", cfg)
+	}
+	if s.cfg.NumChains != 1200 || s.cfg.FanoutSize != 100 || s.cfg.SustainFee != 7 {
+		t.Fatalf("server cfg = %+v, want updated bootstrap values", s.cfg)
+	}
+}
+
+func TestConfigRejectsBootstrapParametersAfterFundingDetected(t *testing.T) {
+	e := newTestEngine(&fakeBroadcaster{})
+	e.queue.PushMemory(UTXO{TxHash: testTxID, TxPos: 0, Value: 10_000})
+	s := newServerWithConfig(e, &Config{AdminToken: "secret"}, nil, slog.Default())
+
+	req := httptest.NewRequest(http.MethodPost, "/config", bytes.NewBufferString(`{"numChains":1200}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d: %s", rr.Code, http.StatusConflict, rr.Body.String())
+	}
+	if got := e.bootstrapConfig().NumChains; got != 4 {
+		t.Fatalf("numChains = %d, want unchanged 4", got)
+	}
+}
+
 // TestChainTermination verifies a chain with value=21 broadcasts 3 times then exits (21→14→7→0).
 func TestChainTermination(t *testing.T) {
 	fb := &fakeBroadcaster{}

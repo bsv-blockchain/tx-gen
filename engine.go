@@ -207,11 +207,97 @@ func (e *Engine) configure(numChains, fanoutSize int) {
 	if fanoutSize <= 0 {
 		fanoutSize = 100
 	}
+	e.mu.Lock()
 	e.numChains = numChains
 	e.fanoutSize = fanoutSize
-	e.setState(func(s *EngineState) {
-		s.ChainsTarget = numChains
-	})
+	e.state.ChainsTarget = numChains
+	e.mu.Unlock()
+}
+
+type BootstrapConfig struct {
+	NumChains  int    `json:"numChains"`
+	FanoutSize int    `json:"fanoutSize"`
+	SustainFee uint64 `json:"sustainFee"`
+}
+
+func (e *Engine) bootstrapConfig() BootstrapConfig {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	numChains := e.numChains
+	if numChains <= 0 {
+		numChains = 10_000
+	}
+	fanoutSize := e.fanoutSize
+	if fanoutSize <= 0 {
+		fanoutSize = 100
+	}
+	sustainFee := uint64(sustainFee)
+	if e.txMode != nil && e.txMode.SustainFee > 0 {
+		sustainFee = e.txMode.SustainFee
+	}
+	return BootstrapConfig{
+		NumChains:  numChains,
+		FanoutSize: fanoutSize,
+		SustainFee: sustainFee,
+	}
+}
+
+func (e *Engine) ConfigureBootstrap(numChains, fanoutSize *int, sustainFeeValue *uint64) (BootstrapConfig, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	queueLen := 0
+	if e.queue != nil {
+		queueLen = e.queue.Len()
+	}
+	lifecycle := e.state.Lifecycle
+	if e.state.BootstrapStage != "none" || (lifecycle != LifecycleStarting && lifecycle != LifecycleBootstrapping) || queueLen != 0 || e.chainsActiveCnt.Load() != 0 {
+		return BootstrapConfig{}, fmt.Errorf("bootstrap parameters can only be changed before initial funding is detected")
+	}
+
+	if numChains != nil {
+		if *numChains <= 0 {
+			return BootstrapConfig{}, fmt.Errorf("numChains must be positive")
+		}
+		e.numChains = *numChains
+	}
+	if fanoutSize != nil {
+		if *fanoutSize <= 0 {
+			return BootstrapConfig{}, fmt.Errorf("fanoutSize must be positive")
+		}
+		e.fanoutSize = *fanoutSize
+	}
+	if sustainFeeValue != nil {
+		if *sustainFeeValue == 0 {
+			return BootstrapConfig{}, fmt.Errorf("sustainFee must be positive")
+		}
+		mode := e.txMode
+		if mode == nil {
+			mode = newTaggedDropTxMode(e.lockScript, *sustainFeeValue)
+			e.txMode = mode
+		}
+		mode.SustainFee = *sustainFeeValue
+	}
+
+	cfg := e.bootstrapConfigLocked()
+	e.state.ChainsTarget = cfg.NumChains
+	return cfg, nil
+}
+
+func (e *Engine) bootstrapConfigLocked() BootstrapConfig {
+	numChains := e.numChains
+	if numChains <= 0 {
+		numChains = 10_000
+	}
+	fanoutSize := e.fanoutSize
+	if fanoutSize <= 0 {
+		fanoutSize = 100
+	}
+	fee := uint64(sustainFee)
+	if e.txMode != nil && e.txMode.SustainFee > 0 {
+		fee = e.txMode.SustainFee
+	}
+	return BootstrapConfig{NumChains: numChains, FanoutSize: fanoutSize, SustainFee: fee}
 }
 
 // SetUTXOSource wires in a UTXOSource (WoC or mock) for bootstrap reconciliation.
@@ -329,26 +415,32 @@ func (e *Engine) run(ctx context.Context) {
 	qlen := e.queue.Len()
 	log.Printf("startup: %d UTXOs", qlen)
 
+	bootstrapCfg := e.bootstrapConfig()
 	e.setState(func(s *EngineState) {
 		s.Lifecycle = LifecycleBootstrapping
-		s.ChainsTarget = e.numChains
+		s.ChainsTarget = bootstrapCfg.NumChains
 	})
 
 	var bootstrapErr error
 	stage := e.Snapshot().BootstrapStage
+	if stage == "none" && qlen == 0 {
+		bootstrapErr = e.waitForSeedUTXO(ctx)
+		qlen = e.queue.Len()
+	}
 	switch {
+	case bootstrapErr != nil:
 	case stage == "l2_done":
 		log.Printf("resuming with %d existing UTXOs", qlen)
 	case stage == "l1_done":
-		log.Printf("bootstrap: L2 fanout from persisted stage (%d → %d)", qlen, e.numChains)
+		log.Printf("bootstrap: L2 fanout from persisted stage (%d → %d)", qlen, e.bootstrapConfig().NumChains)
 		bootstrapErr = e.bootstrapL2(ctx)
 	case stage == "l2_partial":
 		// WoC reconciliation removed; trust queue state from store.
-		if qlen >= e.numChains {
+		if qlen >= e.bootstrapConfig().NumChains {
 			log.Printf("resuming with %d existing UTXOs (l2_partial → l2_done)", qlen)
 			e.setBootstrapStage("l2_done")
 		} else if qlen == e.l1FanoutSize() {
-			log.Printf("bootstrap: L2 fanout from l2_partial (%d → %d)", qlen, e.numChains)
+			log.Printf("bootstrap: L2 fanout from l2_partial (%d → %d)", qlen, e.bootstrapConfig().NumChains)
 			bootstrapErr = e.bootstrapL2(ctx)
 		} else if qlen > 0 {
 			log.Printf("resuming with %d existing UTXOs (partial L2)", qlen)
@@ -359,10 +451,10 @@ func (e *Engine) run(ctx context.Context) {
 	case stage == "unknown":
 		bootstrapErr = fmt.Errorf("bootstrap stage %q requires manual recovery", stage)
 	case qlen == 1:
-		log.Printf("bootstrap: L1 + L2 fanout (1 → %d → %d)", e.l1FanoutSize(), e.numChains)
+		log.Printf("bootstrap: L1 + L2 fanout (1 → %d → %d)", e.l1FanoutSize(), e.bootstrapConfig().NumChains)
 		bootstrapErr = e.bootstrapFull(ctx)
 	case qlen == e.l1FanoutSize():
-		log.Printf("bootstrap: L2 fanout only (%d → %d)", e.l1FanoutSize(), e.numChains)
+		log.Printf("bootstrap: L2 fanout only (%d → %d)", e.l1FanoutSize(), e.bootstrapConfig().NumChains)
 		bootstrapErr = e.bootstrapL2(ctx)
 	case qlen > 0:
 		log.Printf("resuming with %d existing UTXOs", qlen)
@@ -399,6 +491,48 @@ func (e *Engine) trackTPS(ctx context.Context) {
 	}
 }
 
+func (e *Engine) waitForSeedUTXO(ctx context.Context) error {
+	if e.source == nil {
+		return fmt.Errorf("no UTXOs available")
+	}
+
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		utxos, err := e.source.FetchUTXOs(ctx, scriptHash(e.lockScript))
+		if err == nil {
+			e.setState(func(s *EngineState) {
+				s.LastWoCTime = time.Now()
+				s.LastWoCResult = fmt.Sprintf("%d utxos", len(utxos))
+			})
+			if len(utxos) > 0 {
+				for _, u := range utxos {
+					e.queue.Push(u)
+				}
+				SetQueueDepth(e.queue.Len())
+				log.Printf("seed UTXO detected: %d UTXOs", len(utxos))
+				return nil
+			}
+		} else if ctx.Err() != nil {
+			return ctx.Err()
+		} else {
+			e.setState(func(s *EngineState) {
+				s.LastWoCTime = time.Now()
+				s.LastWoCResult = "error"
+				s.LastError = &ErrorRecord{Component: "woc", Msg: err.Error(), Time: time.Now()}
+			})
+			log.Printf("seed UTXO lookup: %v", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 func ceilDivInt(n, d int) int {
 	if d <= 0 {
 		return 0
@@ -407,15 +541,8 @@ func ceilDivInt(n, d int) int {
 }
 
 func (e *Engine) l1FanoutSize() int {
-	fanoutSize := e.fanoutSize
-	if fanoutSize <= 0 {
-		fanoutSize = 100
-	}
-	numChains := e.numChains
-	if numChains <= 0 {
-		numChains = 10_000
-	}
-	return ceilDivInt(numChains, fanoutSize)
+	cfg := e.bootstrapConfig()
+	return ceilDivInt(cfg.NumChains, cfg.FanoutSize)
 }
 
 func l2FanoutSizeForParent(numChains, parentCount, parentIndex int) int {
@@ -516,11 +643,12 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 	if len(parents) == 0 {
 		return fmt.Errorf("no L1 outputs to fan out")
 	}
-	if len(parents) > e.numChains {
+	targetChains := e.bootstrapConfig().NumChains
+	if len(parents) > targetChains {
 		for _, parent := range parents {
 			e.queue.PushMemory(parent)
 		}
-		return fmt.Errorf("too many L1 outputs: got %d, want at most %d", len(parents), e.numChains)
+		return fmt.Errorf("too many L1 outputs: got %d, want at most %d", len(parents), targetChains)
 	}
 
 	type l2result struct {
@@ -536,7 +664,7 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 		statuses[i].Store(int32(psPending))
 		SafeGo(&wg, fmt.Sprintf("l2_%d", i), func() {
 			statuses[i].Store(int32(psBuilding))
-			fanoutSize := l2FanoutSizeForParent(e.numChains, len(parents), i)
+			fanoutSize := l2FanoutSizeForParent(targetChains, len(parents), i)
 			txid, ef, outs, err := buildFanoutTxWithMode(parent, fanoutSize, e.mode())
 			if err != nil {
 				statuses[i].Store(int32(psFailed))
@@ -625,8 +753,8 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 		e.setBootstrapStage("l2_partial")
 		return fmt.Errorf("%s", msg)
 	}
-	if len(expected) != e.numChains {
-		msg := fmt.Sprintf("bootstrap produced %d L2 UTXOs, expected %d", len(expected), e.numChains)
+	if len(expected) != targetChains {
+		msg := fmt.Sprintf("bootstrap produced %d L2 UTXOs, expected %d", len(expected), targetChains)
 		e.setState(func(s *EngineState) {
 			s.Lifecycle = LifecycleFailed
 			s.LastError = &ErrorRecord{Component: "bootstrap_l2", Msg: msg, Time: time.Now()}
@@ -640,13 +768,14 @@ func (e *Engine) bootstrapL2(ctx context.Context) error {
 }
 
 func (e *Engine) startChains(ctx context.Context) {
+	bootstrapCfg := e.bootstrapConfig()
 	e.setState(func(s *EngineState) {
 		if e.tps.Load() > 0 {
 			s.Lifecycle = LifecycleRunning
 		} else {
 			s.Lifecycle = LifecyclePaused
 		}
-		s.ChainsTarget = e.numChains
+		s.ChainsTarget = bootstrapCfg.NumChains
 	})
 
 	var chainWG sync.WaitGroup
