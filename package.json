@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@bsv/sdk": "^2.0.14"
+    "@bsv/sdk": "^2.5.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.0",
