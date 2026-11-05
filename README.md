@@ -116,12 +116,12 @@
 flowchart LR
     F["Funding UTXO<br/>(npm run fund)"] -->|"L1 fanout"| L1["ceil(NUM_CHAINS / FANOUT_SIZE)<br/>L1 outputs"]
     L1 -->|"parallel L2 fanouts"| C["NUM_CHAINS<br/>chain UTXOs"]
-    C -->|"1 sustain tx per chain<br/>every NUM_CHAINS / TPS seconds"| A[("Arcade v2")]
+    C -->|"1 sustain tx per chain<br/>every active chains / TPS seconds"| A[("Arcade v2")]
 ```
 
-1. **Fund.** A new instance waits for a UTXO locked to its script. The [funding script](scripts/initial-funding.ts) plans the run, configures the server, and funds that output from a BSV Desktop wallet.
-2. **Bootstrap.** One L1 fanout and a set of parallel L2 fanouts turn the funding UTXO into `NUM_CHAINS` chain UTXOs. Bootstrap is a persisted state machine (`none` → `l1_done` → `l2_done`): it retries transient failures, resumes from the last completed stage, and starts no chains until the L2 fanout is complete.
-3. **Sustain.** Each chain broadcasts a one-in, one-out transaction every `NUM_CHAINS / TPS` seconds, paying the sustain fee each hop, until its output is spent down to zero.
+1. **Fund.** A new instance polls WhatsOnChain for a UTXO locked to its script. The [funding script](scripts/initial-funding.ts) plans the run, configures the server, and funds that output from a BSV Desktop wallet.
+2. **Bootstrap.** One L1 fanout and a set of parallel L2 fanouts turn the funding UTXO into `NUM_CHAINS` chain UTXOs. Bootstrap is a persisted state machine (`none` → `l1_done` → `l2_partial` → `l2_done`): it retries transient failures, resumes from the last completed stage, and starts no chains until the L2 fanout is complete.
+3. **Sustain.** Each running chain broadcasts a one-in, one-out transaction every `active chains / TPS` seconds, paying the sustain fee each hop, until its output is spent down to zero.
 4. **Resume.** Chain tips and in-flight broadcasts live in a BoltDB file. After a restart tx-gen replays any interrupted broadcast and picks the chains up where they stopped, without a new bootstrap.
 
 ### Core Capabilities
@@ -145,15 +145,15 @@ flowchart LR
 | Metric | Formula | Example |
 |--------|---------|---------|
 | Chain length | `ceil(value / fee)` hops | 1,000 sat at 7 sat/hop = 143 hops |
-| Interval per chain | `NUM_CHAINS / TPS` | 9,600 chains at 16 TPS = 600 s |
+| Interval per chain | `active chains / TPS` | 9,600 chains at 16 TPS = 600 s |
 | Run time | chain length × interval | 143 hops × 10 min ≈ 23.8 hours |
-| Fanout fee | 100 sat/KB of the fanout size, rounded up | 100 outputs (1,752 bytes) = 176 sat |
+| Fanout fee | 100 sat/KB of the serialized fanout, rounded up | 100 outputs (1,752 bytes) = 176 sat |
 
 <br/>
 
 ## 🚀 Quick Start
 
-**Requirements:** a [supported release of Go](https://golang.org/doc/devel/release.html#policy) (or Docker), Node.js 22.6+ for the funding script, a [BSV Desktop](https://github.com/bsv-blockchain/bsv-desktop) wallet with funds for a fresh run, and network access to WhatsOnChain and Arcade.
+**Requirements:** [Go 1.27](https://go.dev/doc/go1.27) or newer (or Docker), Node.js 22.6+ for the funding script, a [BSV Desktop](https://github.com/bsv-blockchain/bsv-desktop) wallet with funds for a fresh run, and network access to WhatsOnChain and Arcade.
 
 **1. Install** the binary, or build the container image:
 
@@ -181,7 +181,9 @@ npm install
 ADMIN_TOKEN=change-me INSTANCE_ID=runner1 npm run fund
 ```
 
-The script asks for the target TPS and run duration, derives `numChains` and `fanoutSize`, applies them with `POST /config`, and funds the output. tx-gen detects it, bootstraps, and starts generating at the target TPS. To fund a deployed instance, pass its URL: `npm run fund https://tx-gen.example.com`.
+The script asks for the target TPS and run duration, derives `numChains` and `fanoutSize`, applies them with the TPS and sustain fee through `POST /config`, then funds the output from the wallet and broadcasts it to Arcade. tx-gen detects it, bootstraps, and starts generating at the target TPS. To fund a deployed instance, pass its URL: `npm run fund https://tx-gen.example.com`. The script also reads a `.env` file from the current directory; its optional settings are listed in the [runbook](docs/runbook.md#-fund-a-new-instance).
+
+The funding script creates the default tagged-drop output. In P2PKH mode (`PRIVATE_KEY` set), fund the instance with a normal payment to the address in its `lock script ready` log line.
 
 **4. Control it** at any time:
 
@@ -202,7 +204,7 @@ All configuration comes from environment variables (see [`.env.example`](.env.ex
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ADMIN_TOKEN` | **required** | Bearer token for the admin endpoints |
-| `INSTANCE_ID` | **required** | Unique per deployment; tags logs and Slack, and the tagged-drop lock script |
+| `INSTANCE_ID` | **required** | Unique per deployment; sets the tagged-drop lock script and tags Slack messages |
 | `PORT` | `8080` | HTTP listen port |
 | `STATE_PATH` | `./state.db` (`/data/state.db` in Docker) | BoltDB state file; use one per instance, key, and mode |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
@@ -233,7 +235,7 @@ All configuration comes from environment variables (see [`.env.example`](.env.ex
 | Method | Path | Auth | Description |
 |--------|------|:----:|-------------|
 | `GET` | `/healthz` | | Liveness: `200` whenever the process is serving |
-| `GET` | `/readyz` | | Readiness: `200` only while chains run healthily, otherwise `503` with the failing checks |
+| `GET` | `/readyz` | | Readiness: `200` only while chains run healthily, otherwise `503`; the body reports every check |
 | `GET` | `/metrics` | | Prometheus metrics |
 | `GET` | `/status` | ✅ | Engine state, redacted configuration, version, and uptime |
 | `GET` | `/arcade/tx/{txid}` | ✅ | Arcade's status for one transaction |
@@ -279,8 +281,9 @@ The response echoes the applied values. Errors: `400` for invalid input, `401` w
     "chainsExhausted": 0,
     "bootstrapStage": "l2_done",
     "consecutiveArcadeFailures": 0,
-    "sse": {"connected": true, "tipHeight": 921337, "tipHash": "..."},
-    "lastReorg": {"height": 921300, "depth": 1, "chainsImpacted": 9600, "...": "..."}
+    "sse": {"connected": true, "tipHeight": 921337, "tipHash": "...", "...": "..."},
+    "lastReorg": {"height": 921300, "depth": 1, "chainsImpacted": 9600, "...": "..."},
+    "...": "..."
   }
 }
 ```
@@ -294,14 +297,14 @@ The response echoes the applied values. Errors: `400` for invalid input, `401` w
 Start tx-gen with Prometheus and Grafana, provisioned with the **tx-gen Overview** dashboard and the [alert rules](monitoring/prometheus-rules.yml):
 
 ```shell script
-INSTANCE_ID=runner1 docker compose up -d --build
+ADMIN_TOKEN=change-me INSTANCE_ID=runner1 docker compose up -d --build
 ```
 
+- **tx-gen API:** http://localhost:8080 (metrics at http://localhost:8080/metrics)
 - **Grafana:** http://localhost:3000 (`admin` / `admin`, anonymous read access enabled)
 - **Prometheus:** http://localhost:9090
-- **Metrics:** http://localhost:8080/metrics
 
-Override the ports and credentials with `GRAFANA_PORT`, `PROMETHEUS_PORT`, `GRAFANA_ADMIN_USER`, and `GRAFANA_ADMIN_PASSWORD`.
+The stack passes the [configuration](#-configuration) variables through to tx-gen, except `PORT` and `STATE_PATH`, which it fixes at `8080` and `/data/state.db`. Three defaults differ for local use: `ADMIN_TOKEN` falls back to `admin1234`, `LOG_LEVEL` to `debug`, and `ARCADE_CALLBACK_TOKEN` to `tx-gen-local-callback`, which enables the Arcade transaction-event stream. Override the Grafana and Prometheus ports and access with `GRAFANA_PORT`, `PROMETHEUS_PORT`, `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD`, and `GRAFANA_ANONYMOUS_ENABLED`.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
@@ -309,12 +312,12 @@ Override the ports and credentials with `GRAFANA_PORT`, `PROMETHEUS_PORT`, `GRAF
 | `txgen_broadcast_latency_seconds` | histogram | `kind` | Arcade broadcast latency |
 | `txgen_tps_target` | gauge | | Requested TPS |
 | `txgen_chains_active` | gauge | | Running chains |
-| `txgen_queue_depth` | gauge | | UTXOs waiting to start a chain |
+| `txgen_queue_depth` | gauge | | UTXOs queued for a fanout or a chain |
 | `txgen_bootstrap_stage` | gauge | `stage` | `1` for the current bootstrap stage |
 | `txgen_chain_terminated_total` | counter | `reason` | Chains that stopped (`exhausted`, `store_error`) |
 | `txgen_reorg_total` | counter | `depth` | Mainnet reorgs seen on the Arcade stream |
 | `txgen_sse_connected` | gauge | `stream` | `1` while an SSE stream is connected |
-| `txgen_sse_event_total` | counter | `stream` | SSE connections and events |
+| `txgen_sse_event_total` | counter | `stream` | SSE connections on every stream, plus Arcade transaction events |
 | `txgen_sse_disconnect_total` | counter | `stream` | SSE disconnects |
 | `txgen_auth_fail_total` | counter | | Rejected admin requests |
 | `txgen_panic_total` | counter | `goroutine` | Recovered panics |
@@ -376,7 +379,7 @@ magex help
 <summary><strong><code>Repository Features</code></strong></summary>
 <br/>
 
-This repository includes 25+ built-in features covering CI/CD, security, code quality, developer experience, and community tooling.
+This repository includes more than 20 built-in features covering CI/CD, security, code quality, developer experience, and community tooling.
 
 **[View the full Repository Features list →](.github/docs/repository-features.md)**
 
@@ -400,7 +403,7 @@ Then create and push a new Git tag using:
 magex version:bump push=true bump=patch branch=master
 ```
 
-This process ensures consistent, repeatable releases with properly versioned artifacts and citation metadata.
+Pushing the tag triggers the [release workflow](.github/workflows/fortress-release.yml), which runs goreleaser to publish consistent, properly versioned artifacts.
 
 </details>
 
@@ -408,14 +411,14 @@ This process ensures consistent, repeatable releases with properly versioned art
 <summary><strong><code>Pre-commit Hooks</code></strong></summary>
 <br/>
 
-Set up the Go-Pre-commit System to run the same formatting, linting, and tests defined in [AGENTS.md](.github/AGENTS.md) before every commit:
+Set up the Go-Pre-commit System to run the formatting, linting, `go mod tidy`, whitespace, and secret-scanning checks described in [AGENTS.md](.github/AGENTS.md) before every commit:
 
 ```bash
 go install github.com/mrz1836/go-pre-commit/cmd/go-pre-commit@latest
 go-pre-commit install
 ```
 
-The system is configured via modular environment files in [`.github/env/`](.github/env/README.md) and provides 17x faster execution than traditional Python-based pre-commit hooks. See the [complete documentation](http://github.com/mrz1836/go-pre-commit) for details.
+The system is configured via modular environment files in [`.github/env/`](.github/env/README.md) and provides 17x faster execution than traditional Python-based pre-commit hooks. See the [complete documentation](https://github.com/mrz1836/go-pre-commit) for details.
 
 </details>
 
@@ -433,13 +436,19 @@ All workflows are driven by modular configuration in [`.github/env/`](.github/en
 <summary><strong><code>Updating Dependencies</code></strong></summary>
 <br/>
 
-To update all dependencies (Go modules, linters, and related tools), run:
+To update the Go module dependencies, run:
 
 ```bash
 magex deps:update
 ```
 
-This command ensures all dependencies are brought up to date in a single step, including Go modules and any tools managed by [MAGE-X](https://github.com/mrz1836/mage-x). It is the recommended way to keep your development environment and CI in sync with the latest versions.
+This updates every Go module in the repository in a single step using [MAGE-X](https://github.com/mrz1836/mage-x). The funding script's npm packages are updated separately:
+
+```bash
+npm update
+```
+
+[Dependabot](.github/dependabot.yml) also opens pull requests for Go modules, npm packages, GitHub Actions, the Dockerfile base images, the Docker Compose monitoring images, and the dev container.
 
 </details>
 
@@ -447,7 +456,7 @@ This command ensures all dependencies are brought up to date in a single step, i
 
 ## 🧪 Examples & Tests
 
-All unit tests, fuzz tests, and [examples](internal/txbuilder/example_test.go) run via [GitHub Actions](https://github.com/bsv-blockchain/tx-gen/actions) and use [Go version 1.26.x](https://go.dev/doc/go1.26). View the [configuration file](.github/workflows/fortress.yml).
+All unit tests, fuzz tests, and [examples](internal/txbuilder/example_test.go) run via [GitHub Actions](https://github.com/bsv-blockchain/tx-gen/actions) and use [Go version 1.27.x](https://go.dev/doc/go1.27). View the [configuration file](.github/workflows/fortress.yml).
 
 Run all tests (fast):
 
@@ -463,6 +472,11 @@ magex test:race
 Run the fuzz tests:
 ```bash script
 magex test:fuzz
+```
+
+Type-check the TypeScript funding script:
+```bash script
+npm run typecheck
 ```
 
 The suite runs the whole service end to end against fake Arcade and WhatsOnChain servers: it bootstraps from a funding UTXO, becomes ready, generates on demand, shuts down, and resumes from the state file.
@@ -483,12 +497,12 @@ magex bench
 
 | Benchmark Name               | Iterations |  ns/op |   B/op | allocs/op |
 |------------------------------|-----------:|-------:|-------:|----------:|
-| BuildSustain (tagged-drop)   |  2,239,471 |  530.8 |    841 |        20 |
-| BuildSustain (P2PKH, signed) |     21,276 | 56,334 |  7,356 |       113 |
-| BuildFanout (100 outputs)    |    161,604 |  7,462 | 17,633 |       325 |
+| BuildSustain (tagged-drop)   |  2,179,030 |  521.8 |    697 |        16 |
+| BuildSustain (P2PKH, signed) |     19,630 | 61,129 |  6,980 |       109 |
+| BuildFanout (100 outputs)    |    191,922 |  6,654 | 12,737 |       123 |
 
-> A single core builds about 1.9 million tagged-drop or 17,000 signed P2PKH sustain transactions per second, so transaction building is never the bottleneck at the default 10,000 TPS cap.
-> Benchmarks executed on Apple Silicon (ARM64).
+> A single core builds about 1.9 million tagged-drop or 16,000 signed P2PKH sustain transactions per second, so transaction building is never the bottleneck at the default 10,000 TPS cap.
+> Benchmarks executed with Go 1.27.3 on an Apple M1 Max (ARM64).
 
 <br/>
 
