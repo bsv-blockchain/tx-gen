@@ -21,8 +21,8 @@
 #   • PR limit = 10 to avoid queue flooding.
 #   • All dependency PRs require passing CI checks before merging.
 #   • Cooldown – new releases wait 3 days before a version update PR
-#     (gomod: patch 3 / minor 7 / major 14 days); first‑party and trusted
-#     publishers are exempt, and security updates are never delayed.
+#     (gomod and npm: patch 3 / minor 7 / major 14 days); first‑party and
+#     trusted publishers are exempt, and security updates are never delayed.
 # ────────────────────────────────────────────────────────────────
 
 version: 2
@@ -135,6 +135,7 @@ updates:
       include: "scope"
     cooldown:
       default-days: 3
+      exclude: ["golang"]
 
   # ──────────────────────────────────────────────────────────────
   # 5. npm (initial funding script: package.json / package-lock.json)
