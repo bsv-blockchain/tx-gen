@@ -1,13 +1,20 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "lib": ["ES2022", "DOM"],
-    "types": ["node"]
-  },
-  "include": ["scripts/**/*.ts"]
+    "compilerOptions": {
+        "esModuleInterop": true,
+        "lib": [
+            "ES2022",
+            "DOM"
+        ],
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+        "skipLibCheck": true,
+        "strict": true,
+        "target": "ES2022",
+        "types": [
+            "node"
+        ]
+    },
+    "include": [
+        "scripts/**/*.ts"
+    ]
 }

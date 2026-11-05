@@ -1,6 +1,15 @@
+# Local stack: tx-gen plus Prometheus and Grafana with the tx-gen dashboard.
+#
+#   INSTANCE_ID=runner1 docker compose up -d --build
+#
+# Grafana: http://localhost:3000   Prometheus: http://localhost:9090
 services:
   tx-gen:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: ${TXGEN_VERSION:-dev}
+    image: tx-gen:local
     ports:
       - "8080:8080"
     volumes:
@@ -13,15 +22,16 @@ services:
       LOG_FORMAT: ${LOG_FORMAT:-json}
       ARCADE_BASE_URL: ${ARCADE_BASE_URL:-https://arcade-v2-us-1.bsvblockchain.tech}
       ARCADE_CALLBACK_TOKEN: ${ARCADE_CALLBACK_TOKEN:-tx-gen-local-callback}
+      PRIVATE_KEY: ${PRIVATE_KEY:-}
       WOC_BASE_URL: ${WOC_BASE_URL:-https://api.whatsonchain.com/v1/bsv/main}
       NUM_CHAINS: ${NUM_CHAINS:-10000}
       FANOUT_SIZE: ${FANOUT_SIZE:-100}
-      SUSTAIN_FEE: ${SUSTAIN_FEE:-7}
+      SUSTAIN_FEE: ${SUSTAIN_FEE:-}
       MAX_TPS: ${MAX_TPS:-10000}
       BROADCAST_CONCURRENCY: ${BROADCAST_CONCURRENCY:-64}
       BROADCAST_RETRY_MAX: ${BROADCAST_RETRY_MAX:-3}
       HTTP_TIMEOUT: ${HTTP_TIMEOUT:-30s}
-      SSE_RECONNECT_INITIAL: ${SSE_RECONNECT_INITIAL:-1s}
+      SSE_RECONNECT_MIN: ${SSE_RECONNECT_MIN:-1s}
       SSE_RECONNECT_MAX: ${SSE_RECONNECT_MAX:-30s}
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
       SLACK_CHANNEL: ${SLACK_CHANNEL:-#alerts}
