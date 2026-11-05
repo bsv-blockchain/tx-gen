@@ -2,8 +2,9 @@
 # Dependabot Configuration
 #
 # Purpose:
-#   • Keep Go modules, GitHub Actions, DevContainer images, Dockerfiles and the
-#     funding script's npm packages updated with the latest security patches.
+#   • Keep Go modules, GitHub Actions, DevContainer images, Dockerfiles, the
+#     Docker Compose monitoring images and the funding script's npm packages
+#     updated with the latest security patches.
 #   • Reduce attack surface by limiting outdated dependencies.
 #   • Minimise PR noise via smart grouping and sane pull‑request limits.
 #
@@ -165,3 +166,28 @@ updates:
       semver-minor-days: 7
       semver-major-days: 14
       exclude: ["@bsv/*"]
+
+  # ──────────────────────────────────────────────────────────────
+  # 6. Docker Compose (Prometheus and Grafana images in docker-compose.yml)
+  # ──────────────────────────────────────────────────────────────
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    target-branch: "master"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "12:15"
+      timezone: "America/New_York"
+    groups:
+      compose-all:
+        patterns: ["*"]
+        # Batch only minor/patch; major bumps open as individual PRs for review
+        update-types: ["minor", "patch"]
+    open-pull-requests-limit: 5
+    assignees: ["mrz1836"]
+    labels: ["chore", "dependencies", "docker"]
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    cooldown:
+      default-days: 3
