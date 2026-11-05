@@ -1,6 +1,6 @@
 {
     "dependencies": {
-        "@bsv/sdk": "^2.0.14"
+        "@bsv/sdk": "^4.0.1"
     },
     "devDependencies": {
         "@types/node": "^22.13.0",
