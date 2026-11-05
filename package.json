@@ -3,7 +3,7 @@
         "@bsv/sdk": "^4.0.1"
     },
     "devDependencies": {
-        "@types/node": "^22.13.0",
+        "@types/node": "^26.6.5",
         "typescript": "^5.8.2"
     },
     "engines": {
