@@ -1,7 +1,62 @@
-.env
-bsv-tx-gen
-state.db
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, build with `go test -c`
+*.test
+
+# Go List
+go.list
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# OS files
 *.db
-ARCHITECTURE.html
-.cache/
+*.DS_Store
+
+# Jetbrains
+.idea/
+
+# Eclipse
+.project
+
+# Notes
+todo.md
+
+# Distribution
+dist
+
+# Code coverage
+coverage.txt
+coverage.out
+
+# Fuzz Tests
+testdata
+
+# AI Models
+.claude
+
+# Node modules
 node_modules/
+
+# Local worktrees
+.worktrees/
+
+# tx-gen binary (go build, magex build) and the MAGE-X build cache
+/tx-gen
+/bin/
+.mage-cache/
+
+# Runtime state (BoltDB) and the Docker volume mount used in the docs
+state.db
+state.db.bak
+data/
+
+# Local secrets (keep .env.example tracked)
+.env
+.env.*
+!.env.example
