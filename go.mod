@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/bsv-blockchain/go-safe-conversion v1.2.0
-	github.com/bsv-blockchain/go-sdk v1.7.3
+	github.com/bsv-blockchain/go-sdk v1.7.4
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
 	go.etcd.io/bbolt v1.5.0
